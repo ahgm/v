@@ -15,7 +15,7 @@ pub fn nsstring(s string) voidptr {
 	# return [ [ NSString alloc ] initWithBytesNoCopy:s.str  length:s.len
 	# encoding:NSUTF8StringEncoding freeWhenDone: false];
 	return 0
-	
+
 	//ns := C.alloc_NSString()
 	//return ns.initWithBytesNoCopy(s.str, length: s.len,
 		//encoding: NSUTF8StringEncoding,		freeWhenDone: false)
@@ -24,22 +24,27 @@ pub fn nsstring(s string) voidptr {
 // returns absolute path to folder where your resources should / will reside
 // for .app packages: .../my.app/Contents/Resources
 // for cli: .../parent_folder/Resources
+
+fn C.CFBundleCopyResourcesDirectoryURL() byteptr
+fn C.CFBundleGetMainBundle() voidptr
+fn C.CFURLGetFileSystemRepresentation() int
+fn C.CFRelease()
+
 pub fn resource_path() string {
 
 	main_bundle := C.CFBundleGetMainBundle()
 	resource_dir_url := C.CFBundleCopyResourcesDirectoryURL(main_bundle)
-	if (isnil(resource_dir_url)) {
+	if isnil(resource_dir_url) {
 		panic('CFBundleCopyResourcesDirectoryURL failed')
 	}
 	buffer_size := 4096
 	mut buffer := malloc(buffer_size)
 	buffer[0] = 0
 	conv_result := C.CFURLGetFileSystemRepresentation(resource_dir_url, true, buffer, buffer_size)
-	if(conv_result == 0) {
+	if conv_result == 0 {
 		panic('CFURLGetFileSystemRepresentation failed')
 	}
-	result := string(buffer)
+	result := unsafe { buffer.vstring() }
 	C.CFRelease(resource_dir_url)
 	return result
 }
-

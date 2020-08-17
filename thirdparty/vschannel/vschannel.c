@@ -279,7 +279,7 @@ static INT connect_to_server(TlsContext *tls_ctx, LPWSTR host, INT port_number) 
 	WCHAR service_name[10];
 	int res = wsprintf(service_name, L"%d", port_number);
 
-	if(WSAConnectByName(Socket,connect_name, service_name, &local_address_length, 
+	if(WSAConnectByNameW(Socket,connect_name, service_name, &local_address_length, 
 		&local_address, &remote_address_length, &remote_address, &tv, NULL) == SOCKET_ERROR) {
 		wprintf(L"Error %d connecting to \"%s\" (%s)\n", 
 			WSAGetLastError(),
@@ -1092,5 +1092,3 @@ static void get_new_client_credentials(TlsContext *tls_ctx) {
 		break;
 	}
 }
-	
-
