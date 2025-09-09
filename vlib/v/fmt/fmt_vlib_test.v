@@ -1,17 +1,20 @@
+// Copyright (c) 2019-2024 Alexander Medvednikov. All rights reserved.
+// Use of this source code is governed by an MIT license
+// that can be found in the LICENSE file.
 import os
 import term
 import benchmark
 import v.ast
 import v.fmt
 import v.parser
-import v.table
 import v.pref
-import v.util
+import v.util.diff
 
-const (
-	error_missing_vexe = 1
-	error_failed_tests = 2
-)
+const error_missing_vexe = 1
+const error_failed_tests = 2
+const fpref = &pref.Preferences{
+	is_fmt: true
+}
 
 fn test_vlib_fmt() {
 	$if !vfmt_everything ? {
@@ -26,11 +29,8 @@ fn test_vlib_fmt() {
 	}
 	vroot := os.dir(vexe)
 	tmpfolder := os.temp_dir()
-	diff_cmd := util.find_working_diff_command() or {
-		''
-	}
 	mut fmt_bench := benchmark.new_benchmark()
-	os.chdir(vroot)
+	os.chdir(vroot) or {}
 	input_files := os.walk_ext('vlib/v/', '.v').filter(!it.contains('/tests/'))
 	fmt_bench.set_total_expected_steps(input_files.len)
 	for istep, ipath in input_files {
@@ -43,23 +43,15 @@ fn test_vlib_fmt() {
 			eprintln(fmt_bench.step_message_fail('cannot read from ${opath}'))
 			continue
 		}
-		table := table.new_table()
-		file_ast := parser.parse_file(ipath, table, .parse_comments, &pref.Preferences{
-				is_fmt: true
-			}, &ast.Scope{
-				parent: 0
-		})
-		result_ocontent := fmt.fmt(file_ast, table, false)
+		mut table := ast.new_table()
+		file_ast := parser.parse_file(ipath, mut table, .parse_comments, fpref)
+		result_ocontent := fmt.fmt(file_ast, mut table, fpref, false)
 		if expected_ocontent != result_ocontent {
 			fmt_bench.fail()
 			eprintln(fmt_bench.step_message_fail('file ${ipath} after formatting, does not look as expected.'))
-			if diff_cmd == '' {
-				eprintln('>> sorry, but no working "diff" CLI command can be found')
-				continue
-			}
-			vfmt_result_file := os.join_path(tmpfolder, 'vfmt_run_over_${ifilename}')
-			os.write_file(vfmt_result_file, result_ocontent)
-			eprintln(util.color_compare_files(diff_cmd, opath, vfmt_result_file))
+			vfmt_result_file := os.join_path(tmpfolder, 'vfmt_run_over_${os.file_name(ipath)}')
+			os.write_file(vfmt_result_file, result_ocontent)!
+			println(diff.compare_files(opath, vfmt_result_file) or { err.msg() })
 			continue
 		}
 		fmt_bench.ok()

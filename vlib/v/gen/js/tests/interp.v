@@ -1,30 +1,30 @@
-fn test_fn(s1, s2 string) {
-	print(if s1 == s2 {'true'} else {'false'})
+fn test_fn(s1 string, s2 string) {
+	print(if s1 == s2 { 'true' } else { 'false' })
 	print('\t=> ')
-	println('"$s1", "$s2"')
+	println('"${s1}", "${s2}"')
 }
 
 fn simple_string_interpolation() {
 	a := 'Hello'
 	b := 'World'
-	res := '$a $b'
+	res := '${a} ${b}'
 	test_fn(res, 'Hello World')
 }
 
 fn mixed_string_interpolation() {
 	num := 7
 	str := 'abc'
-	s1 := 'number=$num'
+	s1 := 'number=${num}'
 	test_fn(s1, 'number=7')
-	s2 := 'string=$str'
+	s2 := 'string=${str}'
 	test_fn(s2, 'string=abc')
-	s3 := 'a: $num | b: $str'
+	s3 := 'a: ${num} | b: ${str}'
 	test_fn(s3, 'a: 7 | b: abc')
 }
 
 fn formatted_string_interpolation() {
 	x := 'abc'
-	axb := 'a:$x:b'
+	axb := 'a:${x}:b'
 	test_fn(axb, 'a:abc:b')
 	x_10 := 'a:${x:10s}:b'
 	x10_ := 'a:${x:-10s}:b'
@@ -38,8 +38,8 @@ fn formatted_string_interpolation() {
 }
 
 /*
-excape_dollar_in_string()
-fn excape_dollar_in_string() {
+escape_dollar_in_string()
+fn escape_dollar_in_string() {
 	i := 42
 	test_fn('($i)', '(42)')
 	println('(\$i)'.contains('i') && !'(\$i)'.contains('42'))
@@ -57,31 +57,31 @@ fn excape_dollar_in_string() {
 
 fn implicit_str() {
 	i := 42
-	test_fn('int $i', 'int 42')
-	test_fn('$i', '42')
-	check := '$i' == '42'
-	//println(check)
-	text := '$i' + '42'
+	test_fn('int ${i}', 'int 42')
+	test_fn('${i}', '42')
+	check := '${i}' == '42'
+	// println(check)
+	text := '${i}' + '42'
 	test_fn(text, '4242')
 }
 
 fn string_interpolation_percent_escaping() {
 	test := 'hello'
 	hello := 'world'
-	x := '%.*s$hello$test |${hello:-30s}|'
+	x := '%.*s${hello}${test} |${hello:-30s}|'
 	test_fn(x, '%.*sworldhello |world                         |')
 }
 
 fn string_interpolation_string_prefix() {
 	// `r`, `c` and `js` are also used as a string prefix.
 	r := 'r'
-	rr := '$r$r'
+	rr := '${r}${r}'
 	test_fn(rr, 'rr')
 	c := 'c'
-	cc := '$c$c'
+	cc := '${c}${c}'
 	test_fn(cc, 'cc')
 	js := 'js'
-	jsjs := '$js$js'
+	jsjs := '${js}${js}'
 	test_fn(jsjs, 'jsjs')
 }
 
@@ -89,17 +89,17 @@ fn interpolation_string_prefix_expr() {
 	r := 1
 	c := 2
 	js := 1
-	test_fn('>${3+r}<', '>4<')
-	test_fn('${r == js} $js', 'true 1')
-	test_fn('>${js+c} ${js+r==c}<', '>3 true<')
+	test_fn('>${3 + r}<', '>4<')
+	test_fn('${r == js} ${js}', 'true 1')
+	test_fn('>${js + c} ${js + r == c}<', '>3 true<')
 }
 
 /*
 inttypes_string_interpolation()
 fn inttypes_string_interpolation() {
 	c := i8(-103)
-	uc := byte(217)
-	uc2 := byte(13)
+	uc := u8(217)
+	uc2 := u8(13)
 	s := i16(-23456)
 	us := u16(54321)
 	i := -1622999040
@@ -131,15 +131,15 @@ fn utf8_string_interpolation() {
 	a := 'à-côté'
 	st := 'Sträßle'
 	m := '10€'
-	test_fn('$a $st $m', 'à-côté Sträßle 10€')
+	test_fn('${a} ${st} ${m}', 'à-côté Sträßle 10€')
 	zz := '>${a:10}< >${st:-8}< >${m:5}<-'
 	zz_expected := '>    à-côté< >Sträßle < >  10€<-'
-	//println('         zz: $zz')
-	//println('zz_expected: $zz_expected')
+	// println('         zz: $zz')
+	// println('zz_expected: $zz_expected')
 	test_fn(zz, zz_expected)
 	// e := '\u20AC' // Eurosign doesn' work with MSVC and tcc
 	e := '€'
-	test_fn('100.00 $e', '100.00 €')
+	test_fn('100.00 ${e}', '100.00 €')
 	m2 := 'Москва́' // cyrillic а́: combination of U+0430 and U+0301, UTF-8: d0 b0 cc 81
 	d := 'Antonín Dvořák' // latin á: U+00E1, UTF-8: c3 a1
 	test_fn(':${m2:7}:${d:-15}:', ': Москва́:Antonín Dvořák :')
@@ -158,7 +158,7 @@ fn (s Sss) str() string {
 
 fn string_interpolation_str_evaluation() {
 	mut x := Sss{17, 13.455893}
-	test_fn('$x', '[17, 13.456]')
+	test_fn('${x}', '[17, 13.456]')
 }
 
 /*
@@ -168,8 +168,8 @@ fn string_interpolation_with_negative_format_width_should_compile_and_run_withou
 	i := 3
 	input := '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 	println('---------------------------------------------------------------------------------------------')
-	println('+60 ${i:10} | input.len: ${input.len:10} | ${input.bytes().hex():60} | $input')
-	println('-60 ${i:10} | input.len: ${input.len:10} | ${input.bytes().hex():-60} | $input')
+	println('+60 ${i:10} | input.len: ${input.len:10} | ${input.hex():60} | $input')
+	println('-60 ${i:10} | input.len: ${input.len:10} | ${input.hex():-60} | $input')
 	println('---------------------------------------------------------------------------------------------')
 	println(true)
 }

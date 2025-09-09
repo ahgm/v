@@ -1,15 +1,13 @@
-// Copyright (c) 2019-2020 Alexander Medvednikov. All rights reserved.
+// Copyright (c) 2019-2024 Alexander Medvednikov. All rights reserved.
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
 module fractions
 
 import math
 
-const (
-	default_eps    = 1.0e-4
-	max_iterations = 50
-	zero           = fraction(0, 1)
-)
+const default_eps = 1.0e-4
+const max_iterations = 50
+const zero = fraction(0, 1)
 
 // ------------------------------------------------------------------------
 // Unwrapped evaluation methods for fast evaluation of continued fractions.
@@ -77,14 +75,14 @@ pub fn approximate(val f64) Fraction {
 }
 
 // approximate_with_eps returns a Fraction
-pub fn approximate_with_eps(val, eps f64) Fraction {
+pub fn approximate_with_eps(val f64, eps f64) Fraction {
 	if val == 0.0 {
 		return zero
 	}
 	if eps < 0.0 {
 		panic('Epsilon value cannot be negative.')
 	}
-	if math.fabs(val) > math.max_i64 {
+	if math.abs(val) > max_i64 {
 		panic('Value out of range.')
 	}
 	// The integer part is separated first. Then we process the fractional
@@ -110,10 +108,10 @@ pub fn approximate_with_eps(val, eps f64) Fraction {
 		// eval_cf is called often so it needs to be performant
 		partial = eval_cf(whole, d)
 		// Check if we're done
-		if math.fabs(val - partial.f64()) < eps {
+		if math.abs(val - partial.f64()) < eps {
 			return partial
 		}
 		frac -= f64(den)
 	}
-	panic("Couldn\'t converge. Please create an issue on https://github.com/vlang/v")
+	panic("Couldn't converge. Please create an issue on https://github.com/vlang/v")
 }

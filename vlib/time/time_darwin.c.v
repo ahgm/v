@@ -2,20 +2,21 @@ module time
 
 #include <mach/mach_time.h>
 
-const (
-	// start_time is needed on Darwin and Windows because of potential overflows
-	start_time = C.mach_absolute_time()
-	time_base = init_time_base()
-)
+// start_time is needed on Darwin and Windows because of potential overflows
+const start_time = C.mach_absolute_time()
 
-[typedef]
-struct C.mach_timebase_info_data_t {
+const time_base = init_time_base()
+
+@[typedef]
+pub struct C.mach_timebase_info_data_t {
 	numer u32
 	denom u32
 }
 
 fn C.mach_absolute_time() u64
+
 fn C.mach_timebase_info(&C.mach_timebase_info_data_t)
+
 fn C.clock_gettime_nsec_np(int) u64
 
 struct InternalTimeBase {
@@ -23,63 +24,62 @@ struct InternalTimeBase {
 	denom u32 = 1
 }
 
-pub struct C.timeval {
-	tv_sec  u64
-	tv_usec u64
-}
-
-fn init_time_base() InternalTimeBase {
+fn init_time_base() C.mach_timebase_info_data_t {
 	tb := C.mach_timebase_info_data_t{}
 	C.mach_timebase_info(&tb)
-	return InternalTimeBase{numer:tb.numer, denom:tb.denom}
+	return C.mach_timebase_info_data_t{
+		numer: tb.numer
+		denom: tb.denom
+	}
 }
 
 fn sys_mono_now_darwin() u64 {
 	tm := C.mach_absolute_time()
 	if time_base.denom == 0 {
-		C.mach_timebase_info(&time_base)
+		unsafe {
+			C.mach_timebase_info(&time_base)
+		}
 	}
 	return (tm - start_time) * time_base.numer / time_base.denom
 }
 
-// NB: vpc_now_darwin is used by `v -profile` .
+// Note: vpc_now_darwin is used by `v -profile` .
 // It should NOT call *any other v function*, just C functions and casts.
-[inline]
+@[inline]
 fn vpc_now_darwin() u64 {
 	tm := C.mach_absolute_time()
 	if time_base.denom == 0 {
-		C.mach_timebase_info(&time_base)
+		unsafe {
+			C.mach_timebase_info(&time_base)
+		}
 	}
 	return (tm - start_time) * time_base.numer / time_base.denom
 }
 
-// darwin_now returns a better precision current time for Darwin based operating system
-// this should be implemented with native system calls eventually
-// but for now a bit tweaky. It uses the deprecated  gettimeofday clock to get
-// the microseconds seconds part and converts to local time
-[inline]
+// darwin_now returns a better precision current time for macos
 fn darwin_now() Time {
-
-	// get the high precision time as UTC clock
-	tv := C.timeval{}
-	C.gettimeofday(&tv, 0)
-
+	// get the high precision time as UTC realtime clock, and use the nanoseconds part
+	mut ts := C.timespec{}
+	C.clock_gettime(C.CLOCK_REALTIME, &ts)
 	loc_tm := C.tm{}
-	C.localtime_r(&tv.tv_sec, &loc_tm)
-
-	return convert_ctime(loc_tm, int(tv.tv_usec))
+	C.localtime_r(voidptr(&ts.tv_sec), &loc_tm)
+	return convert_ctime(loc_tm, int(ts.tv_nsec))
 }
 
-// darwin_utc returns a better precision current time for Darwin based operating system
-// this should be implemented with native system calls eventually
-// but for now a bit tweaky. It uses the deprecated  gettimeofday clock to get
-// the microseconds seconds part and normal local time to get correct local time
-[inline]
+// darwin_utc returns a better precision current time for macos
 fn darwin_utc() Time {
-
 	// get the high precision time as UTC clock
-	tv := C.timeval{}
-	C.gettimeofday(&tv, 0)
+	mut ts := C.timespec{}
+	C.clock_gettime(C.CLOCK_REALTIME, &ts)
+	return unix_nanosecond(i64(ts.tv_sec), int(ts.tv_nsec))
+}
 
-	return unix2(int(tv.tv_sec), int(tv.tv_usec))
+// dummy to compile with all compilers
+fn solaris_now() Time {
+	return Time{}
+}
+
+// dummy to compile with all compilers
+fn solaris_utc() Time {
+	return Time{}
 }

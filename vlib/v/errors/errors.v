@@ -6,24 +6,27 @@ pub enum Reporter {
 	scanner
 	parser
 	checker
+	builder
 	gen
 }
 
-pub struct Error {
-pub:
-	message   string
-	details string
-	file_path string
-	pos       token.Position
-	backtrace string
-	reporter  Reporter
-}
-
-pub struct Warning {
+pub struct CompilerMessage {
 pub:
 	message   string
 	details   string
 	file_path string
-	pos       token.Position
+	pos       token.Pos
 	reporter  Reporter
+}
+
+pub struct Error {
+	CompilerMessage
+}
+
+pub struct Warning {
+	CompilerMessage
+}
+
+pub struct Notice {
+	CompilerMessage
 }

@@ -1,267 +1,359 @@
-// Copyright (c) 2019-2020 Alexander Medvednikov. All rights reserved.
-// Use of this source code is governed by an MIT license
-// that can be found in the LICENSE file.
 module picoev
 
+import net
 import picohttpparser
+import time
 
-#include <errno.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <fcntl.h>
-#include <signal.h>
+// maximum size of the event queue.
+pub const max_queue = 4096
 
-#flag -I @VROOT/thirdparty/picoev
-#flag -L @VROOT/thirdparty/picoev
-#flag @VROOT/thirdparty/picoev/picoev.o
+// event for incoming data ready to be read on a socket.
+pub const picoev_read = 1
 
-#include "src/picoev.h"
+// event for socket ready for writing.
+pub const picoev_write = 2
 
-const (
-	max_fds = 1024
-	timeout_secs = 8
-	max_timeout = 10
-	max_read = 4096
-	max_write = 8192
-)
+// event indicating a timeout has occurred.
+pub const picoev_timeout = 4
 
-struct C.in_addr {
+// flag for adding a file descriptor to the event loop.
+pub const picoev_add = 0x40000000
+
+// flag for removing a file descriptor from the event loop.
+pub const picoev_del = 0x20000000
+
+// event read/write.
+pub const picoev_readwrite = 3
+
+// Target is a data representation of everything that needs to be associated with a single file descriptor (connection).
+pub struct Target {
+pub mut:
+	fd      int // file descriptor
+	loop_id int = -1
+	events  u32
+	cb      fn (int, int, voidptr) = unsafe { nil }
+	// used internally by the kqueue implementation
+	backend int
+}
+
+// Config configures the Picoev instance with server settings and callbacks.
+pub struct Config {
+pub:
+	port         int = 8080
+	cb           fn (voidptr, picohttpparser.Request, mut picohttpparser.Response)         = unsafe { nil }
+	err_cb       fn (voidptr, picohttpparser.Request, mut picohttpparser.Response, IError) = default_error_callback
+	raw_cb       fn (mut Picoev, int, int) = unsafe { nil }
+	user_data    voidptr                   = unsafe { nil }
+	timeout_secs int                       = 8
+	max_headers  int                       = 100
+	max_read     int                       = 4096
+	max_write    int                       = 8192
+	family       net.AddrFamily            = .ip6
+	host         string
+}
+
+// Core structure for managing the event loop and connections.
+// Contains event loop, file descriptor table, timeouts, buffers, and configuration.
+@[heap]
+pub struct Picoev {
+	cb             fn (voidptr, picohttpparser.Request, mut picohttpparser.Response)         = unsafe { nil }
+	error_callback fn (voidptr, picohttpparser.Request, mut picohttpparser.Response, IError) = default_error_callback
+	raw_callback   fn (mut Picoev, int, int) = unsafe { nil }
+
+	timeout_secs int
+	max_headers  int = 100
+	max_read     int = 4096
+	max_write    int = 8192
 mut:
-	s_addr int
+	loop             &LoopType = unsafe { nil }
+	file_descriptors [4096]&Target // TODO: use max_fds here, instead of the hardcoded size, when the compiler allows it
+	timeouts         map[int]i64
+	num_loops        int
+
+	buf &u8 = unsafe { nil }
+	idx [max_fds]int
+	out &u8 = unsafe { nil }
+
+	date string
+pub:
+	user_data voidptr = unsafe { nil }
 }
 
-struct C.sockaddr_in {
-mut:
-	sin_family int
-	sin_port   int
-	sin_addr   C.in_addr
-}
-
-struct C.sockaddr_storage {}
-
-fn C.atoi() int
-fn C.strncasecmp() int
-fn C.socket() int
-fn C.setsockopt() int
-fn C.htonl() int
-fn C.htons() int
-fn C.bind() int
-fn C.listen() int
-fn C.accept() int
-fn C.getaddrinfo() int
-fn C.connect() int
-fn C.send() int
-fn C.recv() int
-//fn C.read() int
-fn C.shutdown() int
-//fn C.close() int
-fn C.ntohs() int
-fn C.getsockname() int
-
-fn C.fcntl() int
-//fn C.write() int
-
-struct C.picoev_loop {}
-
-struct Picoev {
-	loop &C.picoev_loop
-	cb   fn(req picohttpparser.Request, mut res picohttpparser.Response)
-mut:
-	date byteptr
-	buf  byteptr
-	idx  [1024]int
-	out  byteptr
-	oidx [1024]int
-}
-
-fn C.picoev_del(&C.picoev_loop, int) int
-fn C.picoev_set_timeout(&C.picoev_loop, int, int)
-fn C.picoev_add(&C.picoev_loop, int, int, int, &C.picoev_handler, voidptr) int
-fn C.picoev_init(int) int
-fn C.picoev_create_loop(int) &C.picoev_loop
-fn C.picoev_loop_once(&C.picoev_loop, int) int
-fn C.picoev_destroy_loop(&C.picoev_loop) int
-fn C.picoev_deinit() int
-fn C.phr_parse_request() int
-fn C.phr_parse_request_path_pipeline() int
-fn C.phr_parse_request_path() int
-
-[inline]
-fn setup_sock(fd int) {
-	on := 1
-	if C.setsockopt(fd, C.IPPROTO_TCP, C.TCP_NODELAY, &on, sizeof(int)) < 0 {
-		println('setup_sock.setup_sock failed')
-	}
-	if C.fcntl(fd, C.F_SETFL, C.O_NONBLOCK) != 0 {
-		println('fcntl failed')
+// init fills the `file_descriptors` array.
+pub fn (mut pv Picoev) init() {
+	// assert max_fds > 0
+	pv.num_loops = 0
+	for i in 0 .. max_fds {
+		pv.file_descriptors[i] = &Target{}
 	}
 }
 
-[inline]
-fn close_conn(loop &C.picoev_loop, fd int) {
-	C.picoev_del(loop, fd)
-	C.close(fd)
+// add a file descriptor to the event loop.
+@[direct_array_access]
+pub fn (mut pv Picoev) add(fd int, events int, timeout int, callback voidptr) int {
+	if pv == unsafe { nil } || fd < 0 || fd >= max_fds {
+		return -1 // Invalid arguments
+	}
+	mut target := pv.file_descriptors[fd]
+	target.fd = fd
+	target.cb = callback
+	target.loop_id = pv.loop.id
+	target.events = 0
+	if pv.update_events(fd, events | picoev_add) != 0 {
+		if pv.delete(fd) != 0 {
+			elog('Error during del')
+		}
+		return -1
+	}
+	pv.set_timeout(fd, timeout)
+	return 0
 }
 
-[inline]
-fn myread(fd int, b byteptr, max_len, idx int) int {
-	unsafe {
-		return C.read(fd, b + idx, max_len - idx)
+// remove a file descriptor from the event loop.
+@[direct_array_access]
+pub fn (mut pv Picoev) delete(fd int) int {
+	if fd < 0 || fd >= max_fds {
+		return -1 // Invalid fd
+	}
+	mut target := pv.file_descriptors[fd]
+	trace_fd('remove ${fd}')
+	if pv.update_events(fd, picoev_del) != 0 {
+		elog('Error during update_events. event: `picoev.picoev_del`')
+		return -1
+	}
+	pv.set_timeout(fd, 0)
+	target.loop_id = -1
+	target.fd = 0
+	target.cb = unsafe { nil } // Clear callback to prevent accidental invocations
+	return 0
+}
+
+fn (mut pv Picoev) loop_once(max_wait_in_sec int) int {
+	pv.loop.now = get_time()
+	if pv.poll_once(max_wait_in_sec) != 0 {
+		elog('Error during poll_once')
+		return -1
+	}
+	if max_wait_in_sec == 0 {
+		// If no waiting, skip timeout handling for potential performance optimization
+		return 0
+	}
+	// Update loop start time again if waiting occurred
+	pv.loop.now = get_time()
+	pv.handle_timeout()
+	return 0
+}
+
+// set_timeout sets the timeout in seconds for a file descriptor. If a timeout occurs
+// the file descriptors target callback is called with a timeout event.
+@[direct_array_access; inline]
+fn (mut pv Picoev) set_timeout(fd int, secs int) {
+	assert fd < max_fds
+	if secs == 0 {
+		pv.timeouts.delete(fd)
+	} else {
+		pv.timeouts[fd] = pv.loop.now + secs
 	}
 }
 
-[inline]
-fn mysubstr(s byteptr, from, len int) string {
-	unsafe {
-		return tos(s + from, len)
+// handle_timeout loops over all file descriptors and removes them from the loop
+// if they are timed out. Also the file descriptors target callback is called with a
+// timeout event.
+@[direct_array_access; inline]
+fn (mut pv Picoev) handle_timeout() {
+	mut to_remove := []int{}
+	for fd, timeout in pv.timeouts {
+		if timeout <= pv.loop.now {
+			to_remove << fd
+		}
+	}
+	for fd in to_remove {
+		target := pv.file_descriptors[fd]
+		assert target.loop_id == pv.loop.id
+		pv.timeouts.delete(fd)
+		unsafe { target.cb(fd, picoev_timeout, &pv) }
 	}
 }
 
-fn rw_callback(loop &C.picoev_loop, fd, events int, cb_arg voidptr) {
-	mut p := &Picoev(cb_arg)
-	if (events & C.PICOEV_TIMEOUT) != 0 {
-		close_conn(loop, fd)
-		p.idx[fd] = 0
+// accept_callback accepts a new connection from `listen_fd` and adds it to the event loop.
+fn accept_callback(listen_fd int, events int, cb_arg voidptr) {
+	mut pv := unsafe { &Picoev(cb_arg) }
+	accepted_fd := accept(listen_fd)
+	if accepted_fd == -1 {
+		if fatal_socket_error(accepted_fd) == false {
+			return
+		}
+		elog('Error during accept')
 		return
 	}
-	else if (events & C.PICOEV_READ) != 0 {
-		C.picoev_set_timeout(loop, fd, timeout_secs)
-		mut buf := p.buf
-		unsafe {
-			buf += fd * max_read
-		}
-		idx := p.idx[fd]
-		mut r := myread(fd, buf, max_read, idx)
-		if r == 0 {
-			close_conn(loop, fd)
-			p.idx[fd] = 0
+	if accepted_fd >= max_fds {
+		// should never happen
+		elog('Error during accept, accepted_fd >= max_fd')
+		close_socket(accepted_fd)
+		return
+	}
+	trace_fd('accept ${accepted_fd}')
+	setup_sock(accepted_fd) or {
+		elog('setup_sock failed, fd: ${accepted_fd}, listen_fd: ${listen_fd}, err: ${err.code()}')
+		pv.error_callback(pv.user_data, picohttpparser.Request{}, mut &picohttpparser.Response{},
+			err)
+		close_socket(accepted_fd) // Close fd on failure
+		return
+	}
+	pv.add(accepted_fd, picoev_read, pv.timeout_secs, raw_callback)
+}
+
+// close_conn closes the socket `fd` and removes it from the loop.
+@[inline]
+pub fn (mut pv Picoev) close_conn(fd int) {
+	if pv.delete(fd) != 0 {
+		elog('Error during del')
+	}
+	close_socket(fd)
+}
+
+// raw_callback handles raw events (read, write, timeout) for a file descriptor.
+@[direct_array_access]
+fn raw_callback(fd int, events int, context voidptr) {
+	mut pv := unsafe { &Picoev(context) }
+	defer {
+		pv.idx[fd] = 0
+	}
+	if events & picoev_timeout != 0 {
+		trace_fd('timeout ${fd}')
+		if !isnil(pv.raw_callback) {
+			pv.raw_callback(mut pv, fd, events)
 			return
-		} else if r == -1 {
-			if false { //errno == C.EAGAIN || errno == C.EWOULDBLOCK {
-				// TODO
-			} else {
-				close_conn(loop, fd)
-				p.idx[fd] = 0
+		}
+		pv.close_conn(fd)
+		return
+	} else if events & picoev_read != 0 {
+		pv.set_timeout(fd, pv.timeout_secs)
+		if !isnil(pv.raw_callback) {
+			pv.raw_callback(mut pv, fd, events)
+			return
+		}
+		mut request_buffer := pv.buf
+		unsafe {
+			request_buffer += fd * pv.max_read // pointer magic
+		}
+		mut req := picohttpparser.Request{}
+		// Response init
+		mut response_buffer := pv.out
+		unsafe {
+			response_buffer += fd * pv.max_write // pointer magic
+		}
+		mut res := picohttpparser.Response{
+			fd:        fd
+			buf_start: response_buffer
+			buf:       response_buffer
+			date:      pv.date.str
+		}
+		for {
+			// Request parsing loop
+			r := req_read(fd, request_buffer, pv.max_read, pv.idx[fd]) // Get data from socket
+			if r == 0 {
+				// connection closed by peer
+				pv.close_conn(fd)
+				return
+			} else if r == -1 {
+				if fatal_socket_error(fd) == false {
+					return
+				}
+				elog('Error during req_read')
+				// fatal error
+				pv.close_conn(fd)
 				return
 			}
-		} else {
-			r += idx
-			mut s := tos(buf, r)
-			mut out := p.out
-			unsafe {
-				out += fd * max_write
+			pv.idx[fd] += r
+			mut s := unsafe { tos(request_buffer, pv.idx[fd]) }
+			pret := req.parse_request(s) or {
+				// Parse error
+				pv.error_callback(pv.user_data, req, mut &res, err)
+				return
 			}
-			mut res := picohttpparser.Response{
-				fd: fd
-				date: p.date
-				buf_start: out
-				buf: out
+			if pret > 0 { // Success
+				break
 			}
-			unsafe {
-				res.buf += p.oidx[fd]
+			assert pret == -2
+			// request is incomplete, continue the loop
+			if pv.idx[fd] == sizeof(request_buffer) {
+				pv.error_callback(pv.user_data, req, mut &res, error('RequestIsTooLongError'))
+				return
 			}
-			mut req := picohttpparser.Request{}
-			for {
-				pret := req.parse_request(s, 100)
-				if pret <= 0 && s.len > 0 {
-					unsafe { C.memmove(buf, s.str, s.len) }
-					p.idx[fd] = s.len
-					p.oidx[fd] = int(res.buf) - int(res.buf_start)
-					break
-				}
-				c0 := unsafe { req.method.str[0] }
-				if c0 ==`p` || c0 == `P` || c0 == `d` || c0 == `D`  {
-					mut j := 0
-					for {
-						if j == req.num_headers {
-							break
-						}
-						if req.headers[j].name_len == 14 && C.strncasecmp(req.headers[j].name, "content-length", 14) == 0 {
-							//cont_length := C.atoi(tos(req.headers[j].value, req.headers[j].value_len).str)
-							//println('$cont_length')
-							//TODO need to maintain state of incomplete request to collect body later
-						}
-						j = j+1
-					}
-				}
-				p.cb(req, mut &res)
-				if pret >= s.len {
-					p.idx[fd] = 0
-					p.oidx[fd] = 0
-					if res.end() < 0 {
-						close_conn(loop, fd)
-						return
-					}
-					break
-				}
-				s = mysubstr(buf, pret, s.len - pret)
-			}
+		}
+		// Callback (should call .end() itself)
+		pv.cb(pv.user_data, req, mut &res)
+	} else if events & picoev_write != 0 {
+		pv.set_timeout(fd, pv.timeout_secs)
+		if !isnil(pv.raw_callback) {
+			pv.raw_callback(mut pv, fd, events)
+			return
 		}
 	}
 }
 
-fn accept_callback(loop &C.picoev_loop, fd, events int, cb_arg voidptr) {
-	newfd := C.accept(fd, 0, 0)
-	if newfd != -1 {
-		setup_sock(newfd)
-		C.picoev_add(loop, newfd, C.PICOEV_READ, timeout_secs, rw_callback, cb_arg)
-	}
+fn default_error_callback(data voidptr, req picohttpparser.Request, mut res picohttpparser.Response, error IError) {
+	elog('picoev: ${error}')
+	res.end()
 }
 
-pub fn new(port int, cb voidptr) &Picoev {
-	fd := C.socket(C.AF_INET, C.SOCK_STREAM, 0)
-	assert fd != -1
-
-	flag := 1
-	assert C.setsockopt(fd, C.SOL_SOCKET, C.SO_REUSEADDR, &flag, sizeof(int)) == 0
-	assert C.setsockopt(fd, C.SOL_SOCKET, C.SO_REUSEPORT, &flag, sizeof(int)) == 0
-	$if linux {
-		assert C.setsockopt(fd, C.IPPROTO_TCP, C.TCP_QUICKACK, &flag, sizeof(int)) == 0
-		timeout := 10
-		assert C.setsockopt(fd, C.IPPROTO_TCP, C.TCP_DEFER_ACCEPT, &timeout, sizeof(int)) == 0
-		queue_len := 4096
-		assert C.setsockopt(fd, C.IPPROTO_TCP, C.TCP_FASTOPEN, &queue_len, sizeof(int)) == 0
+// new creates a `Picoev` struct and initializes the main loop.
+pub fn new(config Config) !&Picoev {
+	listening_socket_fd := listen(config) or {
+		elog('Error during listen: ${err}')
+		return err
 	}
-
-	mut addr := C.sockaddr_in{}
-	addr.sin_family = C.AF_INET
-	addr.sin_port = C.htons(port)
-	addr.sin_addr.s_addr = C.htonl(C.INADDR_ANY)
-	size := 16 // sizeof(C.sockaddr_in)
-	bind_res := C.bind(fd, &addr, size)
-	assert bind_res == 0
-
-	listen_res := C.listen(fd, C.SOMAXCONN)
-	assert listen_res == 0
-
-	setup_sock(fd)
-
-	C.picoev_init(max_fds)
-	loop := C.picoev_create_loop(max_timeout)
 	mut pv := &Picoev{
-		loop: loop
-		cb: cb
-		date: C.get_date()
-		buf: malloc(max_fds * max_read + 1)
-		out: malloc(max_fds * max_write + 1)
+		num_loops:      1
+		cb:             config.cb
+		error_callback: config.err_cb
+		raw_callback:   config.raw_cb
+		user_data:      config.user_data
+		timeout_secs:   config.timeout_secs
+		max_headers:    config.max_headers
+		max_read:       config.max_read
+		max_write:      config.max_write
 	}
-	C.picoev_add(loop, fd, C.PICOEV_READ, 0, accept_callback, pv)
-
-	go update_date(mut pv)
-
+	if isnil(pv.raw_callback) {
+		pv.buf = unsafe { malloc_noscan(max_fds * config.max_read + 1) }
+		pv.out = unsafe { malloc_noscan(max_fds * config.max_write + 1) }
+	}
+	// epoll on linux
+	// kqueue on macos and bsd
+	// select on windows and others
+	$if linux || termux {
+		pv.loop = create_epoll_loop(0) or { panic(err) }
+	} $else $if freebsd || macos || openbsd {
+		pv.loop = create_kqueue_loop(0) or { panic(err) }
+	} $else {
+		pv.loop = create_select_loop(0) or { panic(err) }
+	}
+	if pv.loop == unsafe { nil } {
+		elog('Failed to create loop')
+		close_socket(listening_socket_fd)
+		return unsafe { nil }
+	}
+	pv.init()
+	pv.add(listening_socket_fd, picoev_read, 0, accept_callback)
 	return pv
 }
 
-pub fn (p Picoev) serve() {
+// serve starts the event loop for accepting new connections.
+// See also picoev.new().
+pub fn (mut pv Picoev) serve() {
+	spawn update_date_string(mut pv)
 	for {
-		C.picoev_loop_once(p.loop, 1)
+		pv.loop_once(1)
 	}
 }
 
-fn update_date(mut p Picoev) {
+// update_date updates the date field of the Picoev instance every second for HTTP headers.
+fn update_date_string(mut pv Picoev) {
 	for {
-		p.date = C.get_date()
-		C.usleep(1000000)
+		// get GMT (UTC) time for the HTTP Date header
+		gmt := time.utc()
+		pv.date = gmt.http_header_string()
+		time.sleep(time.second)
 	}
 }

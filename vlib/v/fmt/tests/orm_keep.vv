@@ -1,4 +1,5 @@
-import sqlite
+import db.sqlite
+import mymodule { ModDbStruct }
 
 struct Customer {
 	id        int
@@ -19,7 +20,7 @@ fn main() {
 	nr_customers := sql db {
 		select count from Customer
 	}
-	println('number of all customers: $nr_customers')
+	println('number of all customers: ${nr_customers}')
 	// V syntax can be used to build queries
 	// db.select returns an array
 	uk_customers := sql db {
@@ -27,19 +28,40 @@ fn main() {
 	}
 	println(uk_customers.len)
 	for customer in uk_customers {
-		println('$customer.id - $customer.name')
+		println('${customer.id} - ${customer.name}')
 	}
 	// by adding `limit 1` we tell V that there will be only one object
 	customer := sql db {
 		select from Customer where id == 1 limit 1
 	}
-	println('$customer.id - $customer.name')
+	best_customer := sql db {
+		select from Customer order by nr_orders desc limit 1
+	}
+	second_best := sql db {
+		select from UCustomerser order by nr_orders desc limit 1 offset 1
+	}
+	println('${customer.id} - ${customer.name}')
 	// insert a new customer
 	new_customer := Customer{
-		name: 'Bob'
+		name:      'Bob'
 		nr_orders: 10
 	}
 	sql db {
 		insert new_customer into Customer
+	}
+	// delete a row
+	sql db {
+		delete from Customer where nr_orders == 10 && name == 'Bob'
+	}
+	sql db {
+		update Customer set name = 'Queen Elizabeth II', age = 150, nr_orders = 42, country = 'Great Britain'
+		where id == 5
+	}
+	// DB is a selective import
+	sql db {
+		delete from ModDbStruct where id == 1
+	}
+	_ := sql db {
+		select from ModDbStruct
 	}
 }

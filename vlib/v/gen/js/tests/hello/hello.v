@@ -1,10 +1,8 @@
 module hello
 
-import hello.hello1
+import v.gen.js.tests.hello.hello1
 
-pub const (
-	hello = 'Hello'
-)
+pub const hello = 'Hello'
 
 pub struct Aaa {
 pub mut:
@@ -29,5 +27,5 @@ pub fn debugger() string {
 }
 
 pub fn excited() string {
-	return "$hello1.nested() $debugger()!"
+	return '${hello1.nested()} ${debugger()}!'
 }

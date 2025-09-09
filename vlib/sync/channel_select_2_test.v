@@ -1,4 +1,3 @@
-import sync
 import time
 
 fn do_rec_i64(ch chan i64) {
@@ -15,9 +14,9 @@ fn do_send_int(ch chan int) {
 	}
 }
 
-fn do_send_byte(ch chan byte) {
+fn do_send_u8(ch chan u8) {
 	for i in 0 .. 300 {
-		ch <- byte(i)
+		ch <- u8(i)
 	}
 }
 
@@ -30,45 +29,34 @@ fn do_send_i64(ch chan i64) {
 fn test_select() {
 	chi := chan int{}
 	chl := chan i64{cap: 1}
-	chb := chan byte{cap: 10}
+	chb := chan u8{cap: 10}
 	recch := chan i64{cap: 0}
-	go do_rec_i64(recch)
-	go do_send_int(chi)
-	go do_send_byte(chb)
-	go do_send_i64(chl)
-	mut channels := [&sync.Channel(chi), &sync.Channel(recch), &sync.Channel(chl), &sync.Channel(chb)]
-	directions := [sync.Direction.pop, .push, .pop, .pop]
+	spawn do_rec_i64(recch)
+	spawn do_send_int(chi)
+	spawn do_send_u8(chb)
+	spawn do_send_i64(chl)
 	mut sum := i64(0)
 	mut rl := i64(0)
-	mut ri := int(0)
-	mut rb := byte(0)
 	mut sl := i64(0)
-	mut objs := [voidptr(&ri), &sl, &rl, &rb]
 	for _ in 0 .. 1200 {
-		idx := sync.channel_select(mut channels, directions, mut objs, -1)
-		match idx {
-			0 {
+		select {
+			ri := <-chi {
 				sum += ri
 			}
-			1 {
+			recch <- sl {
 				sl++
 			}
-			2 {
+			rl = <-chl {
 				sum += rl
 			}
-			3 {
+			rb := <-chb {
 				sum += rb
-			}
-			else {
-				println('got $idx (timeout)')
 			}
 		}
 	}
 	// Use Gauß' formula for the first 2 contributions
-	expected_sum :=  2 * (300 * (300 - 1) / 2) +
-		// the 3rd contribution is `byte` and must be seen modulo 256
-		256 * (256 - 1) / 2 +
-		44 * (44 - 1) / 2
+	// the 3rd contribution is `byte` and must be seen modulo 256
+	expected_sum := 2 * (300 * (300 - 1) / 2) + 256 * (256 - 1) / 2 + 44 * (44 - 1) / 2
 	assert sum == expected_sum
-	time.sleep_ms(20) // to give assert in coroutine enough time
+	time.sleep(20 * time.millisecond) // to give assert in coroutine enough time
 }

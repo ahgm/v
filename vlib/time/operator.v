@@ -1,41 +1,27 @@
 module time
 
-// eq returns true if provided time is equal to time
-[inline]
-pub fn (t1 Time) eq(t2 Time) bool {
-	if t1.unix == t2.unix && t1.microsecond == t2.microsecond {
-		return true
-	}
-	return false
+// operator `==` returns true if provided time is equal to time
+@[inline]
+pub fn (t1 Time) == (t2 Time) bool {
+	return t1.nanosecond == t2.nanosecond && t1.is_local == t2.is_local
+		&& t1.local_unix() == t2.local_unix()
 }
 
-// ne returns true if provided time is not equal to time
-pub fn (t1 Time) ne(t2 Time) bool {
-	return !t1.eq(t2)
+// operator `<` returns true if provided time is less than time
+@[inline]
+pub fn (t1 Time) < (t2 Time) bool {
+	t1u := t1.unix()
+	t2u := t2.unix()
+	return t1u < t2u || (t1u == t2u && t1.nanosecond < t2.nanosecond)
 }
 
-// lt returns true if provided time is less than time
-pub fn (t1 Time) lt(t2 Time) bool {
-	if t1.unix < t2.unix || (t1.unix == t2.unix && t1.microsecond < t2.microsecond) {
-		return true
-	}
-	return false
-}
-
-// le returns true if provided time is less or equal to time
-pub fn (t1 Time) le(t2 Time) bool {
-	return t1.lt(t2) || t1.eq(t2)
-}
-
-// gt returns true if provided time is greater than time
-pub fn (t1 Time) gt(t2 Time) bool {
-	if t1.unix > t2.unix || (t1.unix == t2.unix && t1.microsecond > t2.microsecond) {
-		return true
-	}
-	return false
-}
-
-// ge returns true if provided time is greater or equal to time
-pub fn (t1 Time) ge(t2 Time) bool {
-	return t1.gt(t2) || t1.eq(t2)
+// Time subtract using operator overloading.
+@[inline]
+pub fn (lhs Time) - (rhs Time) Duration {
+	// lhs.unix * 1_000_000_000 + i64(lhs.nanosecond) will overflow i64, for years > 3000 .
+	// Doing the diff first, and *then* multiplying by `second`, is less likely to overflow,
+	// since lhs and rhs will be likely close to each other.
+	unixs := i64(lhs.unix() - rhs.unix()) * second
+	nanos := lhs.nanosecond - rhs.nanosecond
+	return unixs + nanos
 }

@@ -1,77 +1,192 @@
-@echo off
+@setlocal EnableDelayedExpansion EnableExtensions
 
-echo Building V
+@IF NOT DEFINED VERBOSE_MAKE @echo off
 
-REM default tcc
-set tcc_url=https://github.com/vlang/tccbin_win
-set tcc_dir="%~dp0thirdparty\tcc"
+REM Option flags
+set /a shift_counter=0
+set /a flag_local=0
 
-REM let a particular environment specify their own tcc
-if "%TCC_GIT%" =="" goto :init
-set tcc_url="%TCC_GIT%"
+REM Option variables
+set compiler=
+set subcmd=
+set target=build
+
+set V_EXE=./v.exe
+set V_BOOTSTRAP=./v_win_bootstrap.exe
+set V_OLD=./v_old.exe
+set V_UPDATED=./v_up.exe
+
+REM TCC variables
+set tcc_url=https://github.com/vlang/tccbin
+set tcc_dir=thirdparty/tcc
+set tcc_exe=thirdparty/tcc/tcc.exe
+if "%PROCESSOR_ARCHITECTURE%" == "x86" ( set tcc_branch="thirdparty-windows-i386" ) else ( set tcc_branch="thirdparty-windows-amd64" )
+if "%~1" == "-tcc32" set tcc_branch="thirdparty-windows-i386"
+
+REM VC settings
+set vc_url=https://github.com/vlang/vc
+set vc_dir=%~dp0vc
+
+REM Let a particular environment specify their own TCC and VC repos (to help mirrors)
+if /I not ["%TCC_GIT%"] == [""] set tcc_url=%TCC_GIT%
+if /I not ["%TCC_BRANCH%"] == [""] set tcc_branch=%TCC_BRANCH%
+
+if /I not ["%VC_GIT%"] == [""] set vc_url=%VC_GIT%
+
+pushd "%~dp0"
+
+:verifyopt
+REM Read stdin EOF
+if ["%~1"] == [""] goto :init
+
+REM Target options
+if !shift_counter! LSS 1 (
+	if "%~1" == "help" (
+		if not ["%~2"] == [""] set subcmd=%~2& shift& set /a shift_counter+=1
+	)
+	for %%z in (build clean cleanall check help rebuild) do (
+		if "%~1" == "%%z" set target=%1& shift& set /a shift_counter+=1& goto :verifyopt
+	)
+)
+
+REM Compiler option
+for %%g in (-gcc -msvc -tcc -tcc32 -clang) do (
+	if "%~1" == "%%g" set compiler=%~1& set compiler=!compiler:~1!& shift& set /a shift_counter+=1& goto :verifyopt
+)
+
+REM Standard options
+if "%~1" == "--local" (
+	if !flag_local! NEQ 0 (
+		echo The flag %~1 has already been specified. 1>&2
+		exit /b 2
+	)
+	set /a flag_local=1
+	set /a shift_counter+=1
+	shift
+	goto :verifyopt
+)
+
+echo Undefined option: %~1
+exit /b 2
 
 :init
-REM initialize the log file with the failure message
-set log_file=%TEMP%\v_make.bat.log
-echo Failed to compile - Create an issue at 'https://github.com/vlang/v' with the following info:>%log_file%
-echo.>>%log_file%
+goto :!target!
 
-REM alleviate weird issues with this var
-set cloned_tcc=
-set ERRORLEVEL=
-
-pushd %~dp0
-
-if "%~1"=="-local" goto :compile
-if "%~2"=="-local" goto :compile
-
-if exist "vc" (
-	echo Updating vc...
-	cd vc
-	git pull --quiet
-	cd ..
-) else (
-	echo Cloning vc...
-	git clone --depth 1 --quiet https://github.com/vlang/vc
-)
-
-:compile
-REM option to force msvc, gcc or tcc
-if "%~1"=="-gcc"        set force_gcc=1  & goto :gcc_strap
-if "%~2"=="-gcc"        set force_gcc=1  & goto :gcc_strap
-if "%~1"=="-msvc"       set force_msvc=1 & goto :msvc_strap
-if "%~2"=="-msvc"       set force_msvc=1 & goto :msvc_strap
-if "%~1"=="-tcc"        set force_tcc=1  & goto :tcc_strap
-if "%~2"=="-tcc"        set force_tcc=1  & goto :tcc_strap
-if "%~1"=="-fresh_tcc"  set force_tcc=1  & goto :fresh_tcc
-if "%~2"=="-fresh_tcc"  set force_tcc=1  & goto :fresh_tcc
-
-:gcc_strap
+:check
 echo.
-echo Attempting to build v.c with GCC...
+echo Check everything
+"%V_EXE%" test-all
+exit /b 0
 
-where /q gcc
-if %ERRORLEVEL% NEQ 0 (
-	echo  ^> GCC not found
-	if "%force_gcc%" NEQ "" goto :error
-	goto :msvc_strap
+:cleanall
+call :clean
+if %ERRORLEVEL% NEQ 0 exit /b %ERRORLEVEL%
+echo.
+echo Cleanup vc
+echo  ^> Purge TCC binaries
+rmdir /s /q "%tcc_dir%"
+echo  ^> Purge vc repository
+rmdir /s /q "%vc_dir%"
+exit /b 0
+
+:clean
+echo Cleanup build artifacts
+echo  ^> Purge debug symbols
+del *.pdb *.lib *.bak *.out *.ilk *.exp *.obj *.o *.a *.so
+
+echo  ^> Delete old V executable(s)
+del v*.exe
+exit /b 0
+
+:rebuild
+call :cleanall
+goto :build
+
+:help
+if [!subcmd!] == [] (
+	call :usage
+) else (
+	call :help_!subcmd!
+)
+if %ERRORLEVEL% NEQ 0 echo Invalid subcommand: !subcmd!
+exit /b %ERRORLEVEL%
+
+:build
+if !flag_local! NEQ 1 (
+	call :download_tcc
+	if %ERRORLEVEL% NEQ 0 goto :error
+	pushd "%vc_dir%" && (
+		echo Updating vc...
+		echo  ^> Sync with remote !vc_url!
+		cd %vc_dir%
+		git pull --quiet
+		cd ..
+		popd
+	) || call :cloning_vc
+	echo.
 )
 
-gcc -std=c99 -municode -w -o v.exe .\vc\v_win.c>>%log_file% 2>>&1
+echo Building V...
+if not [!compiler!] == [] goto :!compiler!_strap
+
+
+REM By default, use tcc, since we have it prebuilt:
+:tcc_strap
+:tcc32_strap
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from v_win.c) with "!tcc_exe!"
+"!tcc_exe!" -Bthirdparty/tcc -bt10 -g -w -o "%V_BOOTSTRAP%" ./vc/v_win.c -ladvapi32 -lws2_32
+if %ERRORLEVEL% NEQ 0 goto :compile_error
+echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
+"%V_BOOTSTRAP%" -keepc -g -showcc -cc "!tcc_exe!" -cflags -Bthirdparty/tcc -o "%V_UPDATED%" cmd/v
+if %ERRORLEVEL% NEQ 0 goto :clang_strap
+call :move_updated_to_v
+goto :success
+
+:clang_strap
+where /q clang
 if %ERRORLEVEL% NEQ 0 (
-	rem In most cases, compile errors happen because the version of GCC installed is too old
-	gcc --version>>%log_file% 2>>&1
+	echo  ^> Clang not found
+	if not [!compiler!] == [] goto :error
+	goto :gcc_strap
+)
+
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from v_win.c) with Clang
+clang -std=c99 -municode -g -w -o "%V_BOOTSTRAP%" ./vc/v_win.c -ladvapi32 -lws2_32
+if %ERRORLEVEL% NEQ 0 (
+	echo In most cases, compile errors happen because the version of Clang installed is too old
+	clang --version
 	goto :compile_error
 )
 
-echo  ^> Compiling with .\v.exe self
-v.exe self>>%log_file% 2>>&1
+echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
+"%V_BOOTSTRAP%" -keepc -g -showcc -cc clang -o "%V_UPDATED%" cmd/v
 if %ERRORLEVEL% NEQ 0 goto :compile_error
+call :move_updated_to_v
+goto :success
+
+:gcc_strap
+where /q gcc
+if %ERRORLEVEL% NEQ 0 (
+	echo  ^> GCC not found
+	if not [!compiler!] == [] goto :error
+	goto :msvc_strap
+)
+
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from v_win.c) with GCC
+gcc -std=c99 -municode -g -w -o "%V_BOOTSTRAP%" ./vc/v_win.c -ladvapi32 -lws2_32
+if %ERRORLEVEL% NEQ 0 (
+	echo In most cases, compile errors happen because the version of GCC installed is too old
+	gcc --version
+	goto :compile_error
+)
+
+echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
+"%V_BOOTSTRAP%" -keepc -g -showcc -cc gcc -o "%V_UPDATED%" cmd/v
+if %ERRORLEVEL% NEQ 0 goto :compile_error
+call :move_updated_to_v
 goto :success
 
 :msvc_strap
-echo.
-echo Attempting to build v.c with MSVC...
 set VsWhereDir=%ProgramFiles(x86)%
 set HostArch=x64
 if "%PROCESSOR_ARCHITECTURE%" == "x86" (
@@ -80,109 +195,169 @@ if "%PROCESSOR_ARCHITECTURE%" == "x86" (
 	set HostArch=x86
 )
 
-if not exist "%VsWhereDir%\Microsoft Visual Studio\Installer\vswhere.exe" (
+if not exist "%VsWhereDir%/Microsoft Visual Studio/Installer/vswhere.exe" (
 	echo  ^> MSVC not found
-	if "%force_msvc%" NEQ "" goto :error
-	goto :tcc_strap
+	if not [!compiler!] == [] goto :error
+	goto :compile_error
 )
 
-for /f "usebackq tokens=*" %%i in (`"%VsWhereDir%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+for /f "usebackq tokens=*" %%i in (`"%VsWhereDir%/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
 	set InstallDir=%%i
 )
 
-if exist "%InstallDir%\Common7\Tools\vsdevcmd.bat" (
-	call "%InstallDir%\Common7\Tools\vsdevcmd.bat" -arch=%HostArch% -host_arch=%HostArch% -no_logo > NUL
-) else if exist "%VsWhereDir%\Microsoft Visual Studio 14.0\Common7\Tools\vsdevcmd.bat" (
-	call "%VsWhereDir%\Microsoft Visual Studio 14.0\Common7\Tools\vsdevcmd.bat" -arch=%HostArch% -host_arch=%HostArch% -no_logo > NUL
+if exist "%InstallDir%/Common7/Tools/vsdevcmd.bat" (
+	call "%InstallDir%/Common7/Tools/vsdevcmd.bat" -arch=%HostArch% -host_arch=%HostArch% -no_logo
+) else if exist "%VsWhereDir%/Microsoft Visual Studio 14.0/Common7/Tools/vsdevcmd.bat" (
+	call "%VsWhereDir%/Microsoft Visual Studio 14.0/Common7/Tools/vsdevcmd.bat" -arch=%HostArch% -host_arch=%HostArch% -no_logo
 )
 
 set ObjFile=.v.c.obj
 
-cl.exe /volatile:ms /Fo%ObjFile% /O2 /MD /D_VBOOTSTRAP vc\v_win.c user32.lib kernel32.lib advapi32.lib shell32.lib /link /nologo /out:v.exe /incremental:no>>%log_file% 2>>&1
-if %ERRORLEVEL% NEQ 0 goto :compile_error
-
-echo  ^> Compiling with .\v.exe self
-v.exe -cc msvc self>>%log_file% 2>>&1
-del %ObjFile%>>%log_file% 2>>&1
-if %ERRORLEVEL% NEQ 0 goto :compile_error
-goto :success
-
-:fresh_tcc
-rd /s /q "%tcc_dir%"
-
-:clone_tcc
-git clone --depth 1 --quiet "%tcc_url%" "%tcc_dir%"
-set cloned_tcc=1
-goto :tcc_strap
-
-:tcc_strap
-echo.
-echo Attempting to build v.c with TCC...
-
-where /q tcc
+echo  ^> Attempting to build "%V_BOOTSTRAP%" (from v_win.c) with MSVC
+cl.exe /volatile:ms /Fo%ObjFile% /W0 /MD /D_VBOOTSTRAP /F 16777216 "vc/v_win.c" user32.lib kernel32.lib advapi32.lib shell32.lib ws2_32.lib /link /nologo /out:"%V_BOOTSTRAP%" /incremental:no
 if %ERRORLEVEL% NEQ 0 (
-	if exist "%tcc_dir%" (
-		set tcc_exe="%tcc_dir%\tcc.exe"
-	) else if "%cloned_tcc%"=="" (
-		echo  ^> TCC not found
-		echo  ^> Downloading TCC from %tcc_url%
-		goto :clone_tcc
-	) else (
-		echo  ^> TCC not found, even after cloning %cloned_tcc%
-		goto :error
-	)
-) else (
-	for /f "delims=" %%i in ('where tcc') do set tcc_exe=%%i
+	echo In some cases, compile errors happen because of the MSVC compiler version
+	cl.exe
+	goto :compile_error
 )
 
-if exist "%tcc_dir%" (
-	if "%cloned_tcc%"=="" (
-		echo  ^> Updating prebuilt TCC...
-		pushd "%tcc_dir%"\
-		git pull -q
-		popd
-	)
-)
-"%tcc_exe%" -std=c99 -municode -lws2_32 -lshell32 -ladvapi32 -bt10 -w -o v.exe vc\v_win.c
+echo  ^> Compiling "%V_EXE%" with "%V_BOOTSTRAP%"
+"%V_BOOTSTRAP%" -keepc -g -showcc -cc msvc -o "%V_UPDATED%" cmd/v
+del %ObjFile%
 if %ERRORLEVEL% NEQ 0 goto :compile_error
-
-echo  ^> Compiling with .\v.exe self
-v.exe -cc "%tcc_exe%" self>>%log_file% 2>>&1
-if %ERRORLEVEL% NEQ 0 goto :compile_error
+call :move_updated_to_v
 goto :success
+
+:download_tcc
+pushd "%tcc_dir%" && (
+	echo Updating TCC
+	echo  ^> Syncing TCC from !tcc_url!
+	git pull --quiet
+	popd
+) || call :bootstrap_tcc
+
+if [!tcc_exe!] == [] echo  ^> TCC not found, even after cloning& goto :error
+echo.
+exit /b 0
 
 :compile_error
 echo.
-echo.
-type %log_file%
-del %log_file%
+echo Backend compiler error
 goto :error
 
 :error
 echo.
 echo Exiting from error
-popd
+echo ERROR: please follow the instructions in https://github.com/vlang/v/wiki/Installing-a-C-compiler-on-Windows
 exit /b 1
 
 :success
+"%V_EXE%" run cmd/tools/detect_tcc.v
 echo  ^> V built successfully!
-echo  ^> To add V to your PATH, run `.\v.exe symlink`.
-del v_old.exe >>%log_file% 2>>&1
-del %log_file%
+echo  ^> To add V to your PATH, run `%V_EXE% symlink`.
+echo  ^> Note: Antivirus programs may sometimes tell you there is a virus in V (there aren't any).  They can also slow compilation by a considerable amount.  Consider adding exemptions for the V install directory as well as your V project folders.
 
 :version
 echo.
 echo | set /p="V version: "
-.\v.exe version
-if "%cloned_tcc%" NEQ "" (
-	if "%force_tcc%" == "" (
-		echo.
-		echo WARNING:  No C compiler was detected in your PATH. `tcc` was used temporarily
-		echo           to build V, but it may have some bugs and may not work in all cases.
-		echo           A more advanced C compiler like GCC or MSVC is recommended.
-		echo           https://github.com/vlang/v/wiki/Installing-a-C-compiler-on-Windows
-		echo.
-	)
-)
+"%V_EXE%" version
+"%V_EXE%" run .github/problem-matchers/register_all.vsh
+goto :eof
 
+:usage
+echo Usage:
+echo     make.bat [target] [compiler] [options]
+echo.
+echo Compiler:
+echo     -msvc ^| -gcc ^| -tcc ^| -tcc32 ^| -clang    Set C compiler
+echo.
+echo Target:
+echo     build[default]    Compiles V using the given C compiler
+echo     clean             Clean build artifacts and debugging symbols
+echo     cleanall          Cleanup entire ALL build artifacts and vc repository
+echo     check             Check that tests pass, and the repository is in a good shape for Pull Requests
+echo     help              Display help for the given target
+echo     rebuild           Fully clean/reset repository and rebuild V
+echo.
+echo Examples:
+echo     make.bat -msvc
+echo     make.bat -gcc --local
+echo     make.bat build -tcc --local
+echo     make.bat -tcc32
+echo     make.bat help clean
+echo.
+echo Use "make help <target>" for more information about a target, for instance: "make help clean"
+echo.
+echo Note: Any undefined/unsupported options will be ignored
+exit /b 0
+
+:help_help
+echo Usage:
+echo     make.bat help [target]
+echo.
+echo Target:
+echo     build ^| clean ^| cleanall ^| help    Query given target
+exit /b 0
+
+:help_clean
+echo Usage:
+echo     make.bat clean
+echo.
+exit /b 0
+
+:help_cleanall
+echo Usage:
+echo     make.bat cleanall
+echo.
+exit /b 0
+
+:help_build
+echo Usage:
+echo     make.bat build [compiler] [options]
+echo.
+echo Compiler:
+echo     -msvc ^| -gcc ^| -tcc ^| -tcc32 ^| -clang    Set C compiler
+echo.
+echo Options:
+echo    --local     Use the local vc repository without
+echo                syncing with remote
+exit /b 0
+
+:help_rebuild
+echo Usage:
+echo     make.bat rebuild [compiler] [options]
+echo.
+echo Compiler:
+echo     -msvc ^| -gcc ^| -tcc ^| -tcc32 ^| -clang    Set C compiler
+echo.
+echo Options:
+echo    --local     Use the local vc repository without
+echo                syncing with remote
+exit /b 0
+
+:bootstrap_tcc
+echo Bootstrapping TCC...
+echo  ^> TCC not found
+if "!tcc_branch!" == "thirdparty-windows-i386" ( echo  ^> Downloading TCC32 from !tcc_url! , branch !tcc_branch! ) else ( echo  ^> Downloading TCC64 from !tcc_url! , branch !tcc_branch! )
+git clone --filter=blob:none --quiet --branch !tcc_branch! !tcc_url! "%tcc_dir%"
+git --no-pager -C "%tcc_dir%" log -n3
+exit /b 0
+
+:cloning_vc
+echo Cloning vc...
+echo  ^> Cloning from remote !vc_url!
+git clone --filter=blob:none --quiet "%vc_url%"
+exit /b 0
+
+:eof
 popd
+endlocal
+exit /b 0
+
+:move_updated_to_v
+@REM del "%V_EXE%" &:: breaks if `make.bat` is run from `v up` b/c of held file handle on `%V_EXE%`
+if exist "%V_EXE%" move "%V_EXE%" "%V_OLD%" >nul
+REM sleep for at most 100ms
+ping 192.0.2.1 -n 1 -w 100 >nul
+move "%V_UPDATED%" "%V_EXE%" >nul
+exit /b 0

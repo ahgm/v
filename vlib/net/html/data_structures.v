@@ -1,30 +1,29 @@
 module html
 
-#include <limits.h>
+const null_element = int(-1)
+
 struct Stack {
-	null_element int = C.INT_MIN
 mut:
-	elements     []int
-	size         int = 0
+	elements []int
+	size     int
 }
 
-fn (stack Stack) is_null(data int) bool {
-	return data == stack.null_element
+@[inline]
+fn is_null(data int) bool {
+	return data == null_element
 }
 
+@[inline]
 fn (stack Stack) is_empty() bool {
 	return stack.size <= 0
 }
 
 fn (stack Stack) peek() int {
-	if !stack.is_empty() {
-		return stack.elements[stack.size - 1]
-	}
-	return stack.null_element
+	return if !stack.is_empty() { stack.elements[stack.size - 1] } else { null_element }
 }
 
 fn (mut stack Stack) pop() int {
-	mut to_return := stack.null_element
+	mut to_return := null_element
 	if !stack.is_empty() {
 		to_return = stack.elements[stack.size - 1]
 		stack.size--
@@ -44,7 +43,7 @@ fn (mut stack Stack) push(item int) {
 struct BTree {
 mut:
 	all_tags     []Tag
-	node_pointer int = 0
+	node_pointer int
 	childrens    [][]int
 	parents      []int
 }
@@ -53,14 +52,13 @@ fn (mut btree BTree) add_children(tag Tag) int {
 	btree.all_tags << tag
 	if btree.all_tags.len > 1 {
 		for btree.childrens.len <= btree.node_pointer {
-			// println("${btree.childrens.len} <= ${btree.node_pointer}")
-			mut temp_array := btree.childrens
+			mut temp_array := btree.childrens.clone()
 			temp_array << []int{}
 			btree.childrens = temp_array
 		}
 		btree.childrens[btree.node_pointer] << btree.all_tags.len - 1
 		for btree.parents.len < btree.all_tags.len {
-			mut temp_array := btree.parents
+			mut temp_array := btree.parents.clone()
 			temp_array << 0
 			btree.parents = temp_array
 		}
@@ -69,14 +67,17 @@ fn (mut btree BTree) add_children(tag Tag) int {
 	return btree.all_tags.len - 1
 }
 
+@[inline]
 fn (btree BTree) get_children() []int {
 	return btree.childrens[btree.node_pointer]
 }
 
+@[inline]
 fn (btree BTree) get_parent() int {
 	return btree.parents[btree.node_pointer]
 }
 
+@[inline]
 fn (btree BTree) get_stored() Tag {
 	return btree.all_tags[btree.node_pointer]
 }

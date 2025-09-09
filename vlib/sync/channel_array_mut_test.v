@@ -1,8 +1,4 @@
-import sync
-
-const (
-	num_iterations = 10000
-)
+const num_iterations = 10000
 
 struct St {
 mut:
@@ -16,9 +12,7 @@ mut:
 // this function gets an array of channels for `St` references
 fn do_rec_calc_send(chs []chan mut St) {
 	for {
-		mut s := <-chs[0] or {
-			break
-		}
+		mut s := <-chs[0] or { break }
 		s.n++
 		chs[1] <- s
 	}
@@ -26,7 +20,7 @@ fn do_rec_calc_send(chs []chan mut St) {
 
 fn test_channel_array_mut() {
 	mut chs := [chan mut St{cap: 1}, chan mut St{}]
-	go do_rec_calc_send(chs)
+	spawn do_rec_calc_send(chs)
 	mut t := &St{
 		n: 100
 	}
@@ -34,6 +28,6 @@ fn test_channel_array_mut() {
 		chs[0] <- t
 		t = <-chs[1]
 	}
-	(&sync.Channel(chs[0])).close()
+	chs[0].close()
 	assert t.n == 100 + num_iterations
 }

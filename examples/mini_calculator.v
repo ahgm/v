@@ -2,12 +2,10 @@
 // A: This is a mini "home-made" calculator. You may also regard it as a very elementary version of "interpreter".
 import os
 
-const (
-	numeric_char = [`0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `.`, `e`, `E`]
-)
+const numeric_char = [`0`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, `.`, `e`, `E`]
 
 // Convert expression to Reverse Polish Notation.
-fn expr_to_rev_pol(expr string) ?[]string {
+fn expr_to_rev_pol(expr string) ![]string {
 	if expr == '' {
 		return error('err: empty expression')
 	}
@@ -23,7 +21,7 @@ fn expr_to_rev_pol(expr string) ?[]string {
 			stack << expr[pos..end_pos]
 			pos = end_pos
 		} else if end_pos == pos {
-			op := expr[pos].str()
+			op := expr[pos].ascii_str()
 			match op {
 				'(' {
 					stack << op
@@ -50,7 +48,7 @@ fn expr_to_rev_pol(expr string) ?[]string {
 					stack.delete(stack.len - 1)
 				}
 				else {
-					return error('err: invalid character `$op`')
+					return error('err: invalid character `${op}`')
 				}
 			}
 			pos++
@@ -65,7 +63,7 @@ fn expr_to_rev_pol(expr string) ?[]string {
 }
 
 // Evaluate the result of Reverse Polish Notation.
-fn eval_rev_pol(rev_pol []string) ?f64 {
+fn eval_rev_pol(rev_pol []string) !f64 {
 	mut stack := []f64{}
 	for item in rev_pol {
 		if is_num_string(item) {
@@ -113,12 +111,14 @@ fn is_num_string(str string) bool {
 
 fn main() {
 	println('Please enter the expression you want to calculate, e.g. 1e2+(3-2.5)*6/1.5 .')
-	println("Enter \'exit\' or \'EXIT\' to quit.")
+	println("Enter 'exit' or 'EXIT' to quit.")
 	mut expr_count := 0
 	for {
 		expr_count++
-		print('[$expr_count] ')
-		expr := os.get_line().trim_space()
+		expr := os.input_opt('[${expr_count}] ') or {
+			println('')
+			break
+		}.trim_space()
 		if expr in ['exit', 'EXIT'] {
 			break
 		}

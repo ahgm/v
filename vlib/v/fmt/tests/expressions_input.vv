@@ -16,16 +16,16 @@ fn string_inter_lit(mut c checker.Checker, mut node ast.StringInterLiteral) tabl
 				c.error('unknown format specifier `${fmt:c}`',
 					node.fmt_poss[i])
 		}
-			if node.precisions[i] != 0 &&
+			if node.precisions[i] != 987698 &&
 				!typ.is_float() {
 				c.error('precision specification only valid for float types',
 					node.fmt_poss[i])
 			}
 			if node.pluss[i] && !typ.is_number() {
-				c.error('plus prefix only allowd for numbers', node.fmt_poss[i])
+				c.error('plus prefix only allowed for numbers', node.fmt_poss[i])
 			}
 			if (typ.is_unsigned() && fmt !in [`u`, `x`, `X`, `o`, `c`]) || (typ.is_signed() &&
-			   		fmt !in [`d`, `x`, `X`, `o`, `c`]) || (typ.is_any_int()
+			   		fmt !in [`d`, `x`, `X`, `o`, `c`]) || (typ.is_int_literal()
 				&& fmt !in [`d`, `c`, `x`, `X`, `o`,
 		`u`, `x`, `X`, `o`]) || (typ.is_float() && fmt !in [`E`, `F`,
 				`G`, `e`, `f`, `g`]) || (typ.is_pointer() &&
@@ -60,7 +60,7 @@ fn main() {
 	s := []string{}
 	s << '	`$v_str`'
 	println(s)
-	println('this is quite a long string' + ' that is followd by an even longer part that should go to another line')
+	println('this is quite a long string' + ' that is followed by an even longer part that should go to another line')
 	if (a == b && b > r) || (d > r) || (a < b) || (b< d && a+b > r) || (a+b+d >= 0 && r < 0) || (a > b && d-r < b) {
 		println('ok')
 	}
@@ -90,4 +90,13 @@ fn (mut p Parser) name_expr() {
 fn set_nr_muls(t table.Type, nr_muls int) table.Type {
 	return int(t) &
 		0xff00ffff | (nr_muls << 16)
+}
+
+// Test what exprs are treated as multiline. The ternary if only functions as a wrapper.
+// When one expr in a branch doesn't fit a single line, the whole if will be unwrapped.
+fn multiline_exprs() {
+	// StructInit with at least one field
+	_ := if true { Foo{} } else { Foo{ val: 123} }
+	// ConcatExpr with a multiline child expr
+	_, _ := if true { 1, Foo{val: 123} } else { 2, Foo{} }
 }
