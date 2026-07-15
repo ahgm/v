@@ -9,7 +9,20 @@ Each `.h` file in the sokol source code is well-documented as can be seen here:
 
 [sokol_audio.h](https://github.com/floooh/sokol/blob/master/sokol_audio.h)
 
-## Example from `@VROOTDIR/examples/sokol/sounds/simple_sin_tones.v`
+## Windows graphics backend
+
+On Windows, sokol uses OpenGL by default. Compile with `-d sokol_d3d11` to opt in
+to the D3D11 backend:
+
+```sh
+v -d sokol_d3d11 examples/gg/minimal.v
+```
+
+This selects `SOKOL_D3D11` and links D3D11/DXGI without changing the default
+Windows OpenGL path. Screenshot/readback uses the selected backend, but real
+D3D11 pixel correctness should be validated on Windows.
+
+## Example from `@VEXEROOT/examples/sokol/sounds/simple_sin_tones.v`
 
 ```v cgen
 import time
@@ -76,6 +89,8 @@ Another approach to that problem, is to draw everything yourself in a streaming
 texture, then upload that streaming texture as a single draw command to the GPU.
 You can see an example of that done in:
 https://github.com/vlang/v/blob/master/examples/gg/random.v
+and in:
+https://github.com/vlang/v/blob/master/examples/gg/random_stars.v
 
 A third approach, is to only upload your changing inputs to the GPU, and do all
 the calculations and drawing there in shaders.

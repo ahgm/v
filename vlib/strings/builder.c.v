@@ -71,18 +71,39 @@ pub fn (mut b Builder) write_byte(data u8) {
 	b << data
 }
 
-// write_decimal appends a decimal representation of the number `n` into the builder `b`,
-// without dynamic allocation. The higher order digits come first, i.e. 6123 will be written
+// write_decimal appends a decimal representation of `n` without dynamic allocation.
+// The higher order digits come first, i.e. 6123 will be written
 // with the digit `6` first, then `1`, then `2` and `3` last.
-@[direct_array_access]
 pub fn (mut b Builder) write_decimal(n i64) {
 	if n == 0 {
 		b.write_u8(0x30)
 		return
 	}
-	mut buf := [25]u8{}
-	mut x := if n < 0 { -n } else { n }
-	mut i := 24
+	mut mag := u64(n)
+	if n < 0 {
+		b.write_u8(`-`)
+		// Wrapping unsigned negation yields the correct magnitude even for `min_i64`,
+		// whose absolute value does not fit in an i64, so this stays allocation-free for
+		// every input without a special case for the signed 64-bit minimum.
+		mag = u64(0) - mag
+	}
+	b.write_u_decimal(mag)
+}
+
+// write_u_decimal appends a decimal representation of the unsigned number `n` into the
+// builder `b`, without dynamic allocation. Unlike `write_decimal`, it covers the entire
+// `u64` range (values above `max_i64`). The higher order digits come first, i.e. 6123
+// will be written with the digit `6` first, then `1`, then `2` and `3` last.
+@[direct_array_access]
+pub fn (mut b Builder) write_u_decimal(n u64) {
+	if n == 0 {
+		b.write_u8(0x30)
+		return
+	}
+
+	mut buf := [20]u8{} // max_u64 == 18446744073709551615, i.e. 20 digits
+	mut x := n
+	mut i := 19
 	for x != 0 {
 		nextx := x / 10
 		r := x % 10
@@ -90,11 +111,7 @@ pub fn (mut b Builder) write_decimal(n i64) {
 		x = nextx
 		i--
 	}
-	if n < 0 {
-		buf[i] = `-`
-		i--
-	}
-	unsafe { b.write_ptr(&buf[i + 1], 24 - i) }
+	unsafe { b.write_ptr(&buf[i + 1], 19 - i) }
 }
 
 // write implements the io.Writer interface, that is why it returns how many bytes were written to the string builder.
@@ -102,7 +119,7 @@ pub fn (mut b Builder) write(data []u8) !int {
 	if data.len == 0 {
 		return 0
 	}
-	b << data
+	unsafe { b.push_many(data.data, data.len) }
 	return data.len
 }
 
@@ -246,24 +263,11 @@ pub fn (mut b Builder) str() string {
 
 // ensure_cap ensures that the buffer has enough space for at least `n` bytes by growing the buffer if necessary.
 pub fn (mut b Builder) ensure_cap(n int) {
-	// code adapted from vlib/builtin/array.v
-	if n <= b.cap {
-		return
-	}
-
-	new_data := vcalloc(n * b.element_size)
-	if b.data != unsafe { nil } {
-		unsafe { vmemcpy(new_data, b.data, b.len * b.element_size) }
-		// TODO: the old data may be leaked when no GC is used (ref-counting?)
-		if b.flags.has(.noslices) {
-			unsafe { free(b.data) }
-		}
-	}
-	unsafe {
-		b.data = new_data
-		b.offset = 0
-		b.cap = n
-	}
+	// Work through the underlying array pointer, instead of taking a pointer
+	// cast to the alias receiver. This keeps self-hosted builds from generating
+	// an invalid `&b` cast in C.
+	mut arr := unsafe { &[]u8(b) }
+	arr.ensure_cap(n)
 }
 
 // grow_len grows the length of the buffer by `n` bytes if necessary
@@ -285,9 +289,194 @@ pub fn (mut b Builder) grow_len(n int) {
 @[unsafe]
 pub fn (mut b Builder) free() {
 	if b.data != 0 {
-		unsafe { free(b.data) }
+		mut arr := unsafe { &[]u8(b) }
+		unsafe { arr.free() }
+	}
+}
+
+// write_repeated_rune appends multiple copies of the same rune to the accumulated buffer
+@[direct_array_access]
+pub fn (mut b Builder) write_repeated_rune(r rune, count int) {
+	if count <= 0 {
+		return
+	}
+
+	// Convert rune to UTF-8 bytes once
+	mut buffer := [5]u8{}
+	res := unsafe { utf32_to_str_no_malloc(u32(r), mut &buffer[0]) }
+	if res.len == 0 {
+		return
+	}
+
+	if res.len == 1 {
+		b.ensure_cap(b.len + count)
 		unsafe {
-			b.data = nil
+			vmemset(&u8(b.data) + b.len, buffer[0], count)
+			b.len += count
+		}
+		return
+	} else {
+		total_needed := count * res.len
+		b.ensure_cap(b.len + total_needed)
+
+		mut dest := unsafe { &u8(b.data) + b.len }
+		for _ in 0 .. count {
+			unsafe {
+				vmemcpy(dest, res.str, res.len)
+				dest += res.len
+			}
+		}
+		unsafe {
+			b.len += total_needed
+		}
+	}
+}
+
+// IndentParam holds configuration parameters for the indent() function
+@[params]
+pub struct IndentParam {
+pub mut:
+	block_start    rune = `{` // Character that starts a new block (+ indent)
+	block_end      rune = `}` // Character that ends a new block (- indent)
+	indent_char    rune = ` ` // Character used for indentation (space or tab)
+	indent_count   int  = 4   // Number of indent_char per indentation level
+	starting_level int // Initial indentation level (0 = no initial indent)
+}
+
+// IndentState represents the current parsing state of the indent() function
+enum IndentState {
+	normal    // Normal state, processing regular characters
+	in_string // Inside a string literal, ignoring formatting characters
+}
+
+// indent formats a string by applying structured indentation based on block delimiters.
+// It processes the input string `s` and writes the formatted output to the `Builder` `b`.
+// The function preserves content inside string literals (both single and double quotes) and
+// configures indentation behavior through the `param` structure.
+//
+// Key behaviors:
+// 1. Removes existing indentation at the beginning of lines.
+// 2. Applies new indentation based on block nesting levels.
+// 3. Ignores block delimiters and formatting characters inside string literals.
+// 4. Keeps empty blocks (e.g., {}) on the same line.
+// 5. Inserts newlines after `block_start` and before `block_end` (except for empty blocks).
+// 6. Maintains existing line breaks from the input.
+//
+// Example:
+// ```v
+// import strings
+// input := 'User{name:"John" settings:{theme:"dark"}}'
+// mut b := strings.new_builder(64)
+// b.indent(input, indent_count: 2)
+// println(b.str()) // Formatted output: 'User{\n  name:"John" settings:{\n    theme:"dark"\n  }\n}'
+// ```
+@[direct_array_access]
+pub fn (mut b Builder) indent(s string, param IndentParam) {
+	if s.len == 0 {
+		return
+	}
+
+	mut state := IndentState.normal
+	mut indent_level := param.starting_level
+	mut string_char := `\0`
+	mut at_line_start := true
+	for i := 0; i < s.len; i++ {
+		c := rune(s[i])
+		match state {
+			// Normal state: process characters outside of string literals
+			.normal {
+				match c {
+					`"`, `'` { // Note: quote characters for editor display "
+						state = .in_string
+						string_char = c
+						// Add indentation if at the start of a line
+						if at_line_start {
+							b.write_repeated_rune(param.indent_char,
+								indent_level * param.indent_count)
+							at_line_start = false
+						}
+						// Write the opening quote
+						b.write_rune(c)
+					}
+					param.block_start {
+						// Start of a new block
+						// Add indentation if at the start of a line
+						if at_line_start {
+							b.write_repeated_rune(param.indent_char,
+								indent_level * param.indent_count)
+							at_line_start = false
+						}
+
+						// Write the block start character
+						b.write_rune(c)
+
+						// Check for empty block (e.g., {})
+						// Empty blocks stay on the same line
+						if i + 1 < s.len && s[i + 1] == param.block_end {
+							b.write_rune(param.block_end)
+							i++
+						} else {
+							// Non-empty block: increase indentation and add newline
+							indent_level++
+							b.write_rune(`\n`)
+							at_line_start = true
+						}
+					}
+					param.block_end {
+						// End of a block
+						// Decrease indentation level (but not below 0)
+						if indent_level > 0 {
+							indent_level--
+						}
+
+						// If not at the start of a line, add a newline
+						if !at_line_start {
+							b.write_rune(`\n`)
+						}
+
+						// Add indentation for the block end
+						b.write_repeated_rune(param.indent_char, indent_level * param.indent_count)
+						at_line_start = false
+
+						b.write_rune(c)
+					}
+					` `, `\t`, `\r`, `\n` {
+						// Whitespace characters
+						// Only write whitespace if not at the start of a line
+						if !at_line_start {
+							b.write_rune(c)
+						}
+
+						// Newline resets the line start flag
+						if c == `\n` {
+							at_line_start = true
+						}
+					}
+					else {
+						// Any other character
+						// Add indentation if at the start of a line
+						if at_line_start {
+							b.write_repeated_rune(param.indent_char,
+								indent_level * param.indent_count)
+							at_line_start = false
+						}
+						b.write_rune(c)
+					}
+				}
+			}
+			.in_string {
+				// Inside a string literal: preserve all characters as-is
+				b.write_rune(c)
+
+				// Check for string termination
+				// The character must match the opening quote and not be escaped
+				if c == string_char {
+					if s[i - 1] != `\\` {
+						state = .normal
+						string_char = `\0`
+					}
+				}
+			}
 		}
 	}
 }

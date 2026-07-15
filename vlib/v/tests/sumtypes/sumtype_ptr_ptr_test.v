@@ -17,12 +17,13 @@ fn test_main() {
 		}
 		Assign {}
 	}
+
 	if mut command_arr_el_ptr is Call {
 		assert command_arr_el_ptr.text == 'foo'
 	} else {
 		assert false
 	}
 
-	assert typeof(command_arr_el_ptr) == 'Call'
-	assert typeof(command_arr_ptr) == '[]&Command'
+	assert unsafe { typeof(command_arr_el_ptr) == 'Call' }
+	assert unsafe { typeof(command_arr_ptr) == '[]&Command' }
 }

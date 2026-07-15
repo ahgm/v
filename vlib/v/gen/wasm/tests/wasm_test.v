@@ -6,7 +6,7 @@ const is_verbose = os.getenv('VTEST_SHOW_CMD') != ''
 
 // TODO: some logic copy pasted from valgrind_test.v and compiler_test.v, move to a module
 fn test_wasm() {
-	mut runtimes := ['wasmer', 'wasmtime', 'wavm', 'wasm3']
+	mut runtimes := ['wasmer', 'wasmtime', 'wavm', 'wasm3', 'iwasm']
 	mut runtime_found := false
 
 	for runtime in runtimes {
@@ -92,8 +92,7 @@ fn test_wasm() {
 				continue
 			}
 		} else {
-			os.write_file(outfile, res_wasm.output.trim_right('\r\n').replace('\r\n',
-				'\n'))!
+			os.write_file(outfile, res_wasm.output.trim_right('\r\n').replace('\r\n', '\n'))!
 		}
 		bench.ok()
 		eprintln(bench.step_message_ok(relative_test_path))

@@ -54,7 +54,9 @@ fn (mut dtp DTP) read() ![]u8 {
 }
 
 fn (mut dtp DTP) close() {
-	dtp.conn.close() or { panic(err) }
+	if dtp.conn != unsafe { nil } {
+		dtp.conn.close() or { panic(err) }
+	}
 }
 
 struct FTP {
@@ -67,7 +69,8 @@ mut:
 // new returns an `FTP` instance.
 pub fn new() FTP {
 	mut f := FTP{
-		conn: unsafe { nil }
+		conn:   unsafe { nil }
+		reader: io.new_buffered_reader(reader: unsafe { nil })
 	}
 	f.buffer_size = 1024
 	return f
@@ -141,8 +144,10 @@ pub fn (mut zftp FTP) login(user string, passwd string) !bool {
 
 // close closes the FTP connection.
 pub fn (mut zftp FTP) close() ! {
-	zftp.write('QUIT')!
-	zftp.conn.close()!
+	if zftp.conn != unsafe { nil } {
+		zftp.write('QUIT')!
+		zftp.conn.close()!
+	}
 }
 
 // pwd returns the current working directory on the remote host for the logged in user.
@@ -171,6 +176,7 @@ pub fn (mut zftp FTP) cd(dir string) ! {
 		}
 		else {}
 	}
+
 	$if debug {
 		println('CD ${data}')
 	}
@@ -182,9 +188,10 @@ fn new_dtp(msg string) !&DTP {
 	}
 	ip, port := get_host_ip_from_dtp_message(msg)
 	mut dtp := &DTP{
-		ip:   ip
-		port: port
-		conn: unsafe { nil }
+		ip:     ip
+		port:   port
+		conn:   unsafe { nil }
+		reader: io.new_buffered_reader(reader: unsafe { nil })
 	}
 	conn := net.dial_tcp('${ip}:${port}') or { return error('Cannot connect to the data channel') }
 	dtp.conn = conn
@@ -232,7 +239,6 @@ pub fn (mut zftp FTP) dir() ![]string {
 		if lfile.len > 1 {
 			trimmed := lfile.after(':')
 			dir << trimmed#[3..trimmed.len - 1]
-			continue
 		}
 	}
 	return dir
@@ -250,6 +256,10 @@ pub fn (mut zftp FTP) get(file string) ![]u8 {
 		return error('Data connection not ready')
 	}
 	blob := dtp.read()!
+	result, _ := zftp.read()!
+	if result != complete {
+		return error('`RETR` not ok')
+	}
 	dtp.close()
 	return blob
 }

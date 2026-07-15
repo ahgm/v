@@ -3,7 +3,10 @@ name: CI Linux
 on:
   workflow_dispatch:
   push:
+    branches:
+      - master
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/linux_ci.yml'
@@ -11,6 +14,7 @@ on:
       - '!cmd/tools/builders/**.v'
   pull_request:
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/linux_ci.yml'
@@ -27,8 +31,12 @@ jobs:
     timeout-minutes: 121
     env:
       VFLAGS: -cc tcc -no-retry-compilation
+      VTEST_SHOW_LONGEST_BY_RUNTIME: 3
+      VTEST_SHOW_LONGEST_BY_COMPTIME: 3
+      VTEST_SHOW_LONGEST_BY_TOTALTIME: 3
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cache-apt-packages-action
       - name: Build v
         run: make -j4 && ./v symlink
       - name: Build v with -prealloc
@@ -47,6 +55,8 @@ jobs:
         run: v run ci/linux_ci.vsh verify_v_test_works_tcc
       - name: Test pure V math module
         run: v run ci/linux_ci.vsh test_pure_v_math_module_tcc
+      - name: Test inline assembly on linux
+        run: v run ci/linux_ci.vsh test_inline_assembly
       - name: Self tests
         run: v run ci/linux_ci.vsh self_tests_tcc
       - name: Build examples
@@ -75,20 +85,110 @@ jobs:
         run: v run ci/linux_ci.vsh test_leak_detector_tcc
       - name: Test leak detector not being active for normal compile
         run: v run ci/linux_ci.vsh test_leak_detector_not_active_tcc
-      - name: native cross compilation to macos
-        run: v run ci/linux_ci.vsh native_cross_compilation_to_macos
 
   gcc-linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 121
+    env:
+      VTEST_SHOW_LONGEST_BY_RUNTIME: 3
+      VTEST_SHOW_LONGEST_BY_COMPTIME: 3
+      VTEST_SHOW_LONGEST_BY_TOTALTIME: 3
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cache-apt-packages-action
       - name: Build V
         run: make -j4 && ./v symlink
       - name: All code is formatted
         run: v run ci/linux_ci.vsh all_code_is_formatted_gcc
       - name: Install dependencies for examples and tools
         run: v run ci/linux_ci.vsh install_dependencies_for_examples_and_tools_gcc
+      - name: Multiwindow Linux checks
+        run: |
+          set -euo pipefail
+
+          env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
+            ./v test vlib/gg/legacy_import_multiwindow_isolation_test.v
+
+          env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
+            ./v -d gg_multiwindow test \
+              vlib/x/multiwindow \
+              vlib/gg/multiwindow_api_d_gg_multiwindow_test.v \
+              vlib/gg/frame_pacing_test.v \
+              vlib/gg/draw_fns_api_test.v \
+              vlib/gg/draw_rect_empty_test.v
+
+          env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
+            ./v -d gg_multiwindow -d sokol_wayland test \
+              vlib/x/multiwindow \
+              vlib/gg/multiwindow_api_d_gg_multiwindow_test.v \
+              vlib/gg/frame_pacing_test.v \
+              vlib/gg/draw_fns_api_test.v \
+              vlib/gg/draw_rect_empty_test.v
+
+          xvfb-run -a -s "-screen 0 1280x1024x24" \
+            env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE LIBGL_ALWAYS_SOFTWARE=true \
+            ./v -d gg_multiwindow -d x_multiwindow_x11 test \
+              vlib/x/multiwindow \
+              vlib/gg/multiwindow_api_d_gg_multiwindow_test.v \
+              vlib/gg/frame_pacing_test.v \
+              vlib/gg/draw_fns_api_test.v \
+              vlib/gg/draw_rect_empty_test.v
+
+          ./v -d gg_multiwindow -o /tmp/gg_multiwindow_default examples/gg/multiwindow.v
+          ./v -d gg_multiwindow -d x_multiwindow_x11 -o /tmp/gg_multiwindow_x11 examples/gg/multiwindow.v
+          ./v -d gg_multiwindow -d sokol_wayland -o /tmp/gg_multiwindow_wayland examples/gg/multiwindow.v
+
+          run_headless_example() {
+            label="$1"
+            binary="$2"
+            stdout="$(mktemp)"
+            stderr="$(mktemp)"
+            env -u DISPLAY -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE \
+              "$binary" >"$stdout" 2>"$stderr"
+            echo "::group::${label} stdout"
+            cat "$stdout"
+            echo "::endgroup::"
+            echo "::group::${label} stderr"
+            cat "$stderr"
+            echo "::endgroup::"
+            grep -Fq "gg multi-window backend: mock" "$stdout"
+            grep -Fq "capability families:" "$stdout"
+            grep -Fq "mock backend selected; stopping after initial lifecycle events" "$stdout"
+            grep -Fq "live windows:" "$stdout"
+            grep -Fq "window created:" "$stdout"
+          }
+
+          run_x11_example() {
+            label="$1"
+            binary="$2"
+            stdout="$(mktemp)"
+            stderr="$(mktemp)"
+            set +e
+            xvfb-run -a -s "-screen 0 1280x1024x24" \
+              env -u WAYLAND_DISPLAY -u XDG_SESSION_TYPE LIBGL_ALWAYS_SOFTWARE=true \
+              timeout 12s stdbuf -oL -eL "$binary" >"$stdout" 2>"$stderr"
+            status=$?
+            set -e
+            echo "::group::${label} stdout"
+            cat "$stdout"
+            echo "::endgroup::"
+            echo "::group::${label} stderr"
+            cat "$stderr"
+            echo "::endgroup::"
+            grep -Fq "gg multi-window backend:" "$stdout"
+            grep -Fq "capability families:" "$stdout"
+            grep -Fq "live windows:" "$stdout"
+            grep -Fq "window created:" "$stdout"
+            if [ "$status" -eq 124 ]; then
+              echo "X11 example reached the controlled timeout after producing expected launch logs."
+              return 0
+            fi
+            return "$status"
+          }
+
+          run_headless_example "gg multiwindow headless mock" /tmp/gg_multiwindow_default
+          run_headless_example "gg multiwindow Wayland-build headless mock" /tmp/gg_multiwindow_wayland
+          run_x11_example "gg multiwindow Xvfb/X11" /tmp/gg_multiwindow_x11
       - name: Recompile V with -cstrict and gcc
         run: v run ci/linux_ci.vsh recompile_v_with_cstrict_gcc
       - name: Valgrind v.c
@@ -121,10 +221,6 @@ jobs:
         run: v run ci/linux_ci.vsh v_self_compilation_parallel_cc_gcc
       - name: Build modules
         run: v run ci/linux_ci.vsh build_modules_gcc
-      - name: native machine code generation
-        run: v run ci/linux_ci.vsh native_machine_code_generation_gcc
-      - name: native cross compilation to macos
-        run: v run ci/linux_ci.vsh native_cross_compilation_to_macos
       - name: compile vdoctor.v with -prod
         run: v run ci/linux_ci.vsh compile_vdoctor_prod_gcc
       - name: compile vup.v with -prod
@@ -135,8 +231,12 @@ jobs:
     timeout-minutes: 121
     env:
       VFLAGS: -cc clang
+      VTEST_SHOW_LONGEST_BY_RUNTIME: 3
+      VTEST_SHOW_LONGEST_BY_COMPTIME: 3
+      VTEST_SHOW_LONGEST_BY_TOTALTIME: 3
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cache-apt-packages-action
       - name: Build V
         run: make -j4 && ./v symlink
       - name: All code is formatted
@@ -169,7 +269,3 @@ jobs:
         run: v run ci/linux_ci.vsh build_examples_autofree_clang
       - name: Build modules
         run: v run ci/linux_ci.vsh build_modules_clang
-      - name: native machine code generation
-        run: v run ci/linux_ci.vsh native_machine_code_generation_clang
-      - name: native cross compilation to macos
-        run: v run ci/linux_ci.vsh native_cross_compilation_to_macos

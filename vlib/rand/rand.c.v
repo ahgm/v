@@ -82,6 +82,7 @@ pub fn new_uuid_v7_session() UUIDSession {
 }
 
 // next get a new uuid_v7 from current session.
+@[ignore_overflow]
 pub fn (mut u UUIDSession) next() string {
 	timestamp := u64(time.now().unix_nano())
 	// make place for holding 4 bits `version`
@@ -104,7 +105,7 @@ fn internal_ulid_at_millisecond(mut rng PRNG, unix_time_milli u64) string {
 	mut i := 9
 	for i >= 0 {
 		unsafe {
-			buf[i] = ulid_encoding[t & 0x1F]
+			buf[i] = ulid_encoding[int(t & 0x1F)]
 		}
 		t = t >> 5
 		i--
@@ -114,7 +115,7 @@ fn internal_ulid_at_millisecond(mut rng PRNG, unix_time_milli u64) string {
 	i = 10
 	for i < 19 {
 		unsafe {
-			buf[i] = ulid_encoding[x & 0x1F]
+			buf[i] = ulid_encoding[int(x & 0x1F)]
 		}
 		x = x >> 5
 		i++
@@ -123,7 +124,7 @@ fn internal_ulid_at_millisecond(mut rng PRNG, unix_time_milli u64) string {
 	x = rng.u64()
 	for i < 26 {
 		unsafe {
-			buf[i] = ulid_encoding[x & 0x1F]
+			buf[i] = ulid_encoding[int(x & 0x1F)]
 		}
 		x = x >> 5
 		i++
@@ -194,6 +195,12 @@ fn read_32(mut rng PRNG, mut buf []u8) {
 @[direct_array_access]
 fn read_64(mut rng PRNG, mut buf []u8) {
 	p64 := unsafe { &u64(buf.data) }
+	if u64(p64) & 0xF != 0 {
+		for i in 0 .. buf.len {
+			buf[i] = rng.u8()
+		}
+		return
+	}
 	u64s := buf.len / 8
 	for i in 0 .. u64s {
 		unsafe {

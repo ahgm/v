@@ -1,16 +1,14 @@
-// Copyright (c) 2019-2024 Alexander Medvednikov. All rights reserved.
-// Use of this source code is governed by an MIT license
-// that can be found in the LICENSE file.
+// vtest build: !sanitized_job?
 module scanner
 
 import v.token
 import v.pref
 
 fn scan_kinds(text string) []token.Kind {
-	mut scanner := new_scanner(text, .skip_comments, &pref.Preferences{})
+	mut scanner := new_plain_scanner(text, .skip_comments, &pref.Preferences{})
 	mut token_kinds := []token.Kind{}
 	for {
-		tok := scanner.scan()
+		tok := scanner.text_scan()
 		if tok.kind == .eof {
 			break
 		}
@@ -20,10 +18,10 @@ fn scan_kinds(text string) []token.Kind {
 }
 
 fn scan_tokens(text string) []token.Token {
-	mut scanner := new_scanner(text, .parse_comments, &pref.Preferences{})
+	mut scanner := new_plain_scanner(text, .parse_comments, &pref.Preferences{})
 	mut tokens := []token.Token{}
 	for {
-		tok := scanner.scan()
+		tok := scanner.text_scan()
 		if tok.kind == .eof {
 			break
 		}
@@ -151,16 +149,13 @@ fn test_ref_ref_array_ref_ref_foo() {
 }
 
 fn test_escape_rune() {
-	// these lines work if the v compiler is working
-	// will not work until v compiler on github is updated
-	// assert `\x61` == `a`
-	// assert `\u0061` == `a`
-	// assert `\U00000061` == `a`
+	assert `\x61` == `a`
+	assert `\u0061` == `a`
+	assert `\U00000061` == `a`
 
-	// will not work until PR is accepted
-	// assert `\141` == `a`
-	// assert `\xe2\x98\x85` == `★`
-	// assert `\342\230\205` == `★`
+	assert `\141` == `a`
+	assert `\xe2\x98\x85` == `★`
+	assert `\342\230\205` == `★`
 
 	// the following lines test the scanner module
 	// even before it is compiled into the v executable
@@ -318,6 +313,43 @@ fn test_escape_string() {
 	// result = scan_tokens(r'`hello`') // should always result in an error
 }
 
+fn assert_str_interpolation_works(mlen int, text string) {
+	mut max_len := 0
+	mut scanner := new_plain_scanner(text, .skip_comments, &pref.Preferences{})
+	for {
+		tok := scanner.text_scan()
+		if scanner.str_helper_tokens.len > max_len {
+			max_len = scanner.str_helper_tokens.len
+		}
+		if tok.kind == .eof {
+			break
+		}
+	}
+	assert max_len == mlen
+	assert scanner.errors.len == 0
+	assert scanner.str_helper_tokens.len == 0
+}
+
+fn test_string_interpolation_with_nested_string_does_not_grow_str_helper_tokens_too_much() {
+	sinterpolation := " s := 'x \${if true { '{' } else { '}' }} y' "
+	assert_str_interpolation_works(3, sinterpolation)
+	assert_str_interpolation_works(3, sinterpolation + sinterpolation + sinterpolation)
+	assert_str_interpolation_works(3, '{'.repeat(100) + sinterpolation + '}'.repeat(100))
+	assert_str_interpolation_works(0, '{'.repeat(100) + '}'.repeat(100))
+}
+
+fn test_dollar_sign_is_literal_without_braces() {
+	mut result := scan_tokens("'a$b'")
+	assert result.len == 1
+	assert result[0].kind == .string
+	assert result[0].lit == 'a$b'
+
+	result = scan_tokens('"a$b"')
+	assert result.len == 1
+	assert result[0].kind == .string
+	assert result[0].lit == 'a$b'
+}
+
 fn test_comment_string() {
 	mut result := scan_tokens('// single line comment will get an \\x01 prepended')
 	assert result[0].kind == .comment
@@ -325,4 +357,35 @@ fn test_comment_string() {
 	// result = scan_tokens('/// doc comment will keep third / at beginning')
 	// result = scan_tokens('/* block comment will be stripped of whitespace */')
 	// result = scan_tokens('a := 0 // line end comment also gets \\x01 prepended')
+}
+
+// Strings without proper 00B at the end keep scanner from failing, hence scanner
+// will read beyond end of string into unknown memory unless there are proper bound checks
+fn test_truncated_escape_at_eof_does_not_read_past_end() {
+	prefs := &pref.Preferences{
+		output_mode: .silent
+	}
+	// buf_x = ['"', '\\', 'x', 'a', 'b', '"']; 3-byte view ends after 'x'.
+	// Buggy scanner reads [3]='a', [4]='b' — valid hex — and reports NO \x error.
+	buf_x := r'"\xab"'.bytes()
+	text_x := unsafe { tos(buf_x.data, 3) }
+	mut s := new_plain_scanner(text_x, .skip_comments, prefs)
+	_ = s.text_scan()
+	assert s.errors.any(it.message.contains('used without two following hex digits')), r'scanner must report \x error for "\xab" truncated after "\x"'
+
+	// buf_u = ['"', '\\', 'u', '1', '2', '3', '4', '"']; 3-byte view ends after 'u'.
+	// Buggy scanner reads [3]...[6] — all valid hex — and reports NO \u error.
+	buf_u := r'"\u1234"'.bytes()
+	text_u := unsafe { tos(buf_u.data, 3) }
+	mut s2 := new_plain_scanner(text_u, .skip_comments, prefs)
+	_ = s2.text_scan()
+	assert s2.errors.any(it.message.contains('incomplete 16 bit unicode')), r'scanner must report \u error for "\u1234" truncated after "\u"'
+
+	// buf_uu = ['"', '\\', 'U', '1'...'8', '"']; 3-byte view ends after 'U'.
+	// Buggy scanner reads [3]...[10] — all valid hex — and reports NO \U error.
+	buf_uu := r'"\U12345678"'.bytes()
+	text_uu := unsafe { tos(buf_uu.data, 3) }
+	mut s3 := new_plain_scanner(text_uu, .skip_comments, prefs)
+	_ = s3.text_scan()
+	assert s3.errors.any(it.message.contains('incomplete 32 bit unicode')), r'scanner must report \U error for "\U12345678" truncated after "\U"'
 }

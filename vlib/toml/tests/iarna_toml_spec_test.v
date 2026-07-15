@@ -1,7 +1,7 @@
 import os
 import toml
 import toml.ast
-import x.json2
+import json2
 
 const hide_oks = os.getenv('VTEST_HIDE_OK') == '1'
 
@@ -171,7 +171,8 @@ fn test_iarna_toml_spec_tests() {
 
 					iarna_yaml_path := valid_test_file.all_before_last('.') + '.yaml'
 					if os.exists(iarna_yaml_path) {
-						converted_json_path = os.join_path(compare_work_dir_root, '${valid_test_file_name}.yaml.json')
+						converted_json_path = os.join_path(compare_work_dir_root,
+							'${valid_test_file_name}.yaml.json')
 						run([python, '-c',
 							"'import sys, yaml, json; json.dump(yaml.load(sys.stdin, Loader=yaml.FullLoader), sys.stdout, indent=4)'",
 							'<', iarna_yaml_path, '>', converted_json_path]) or {
@@ -179,7 +180,7 @@ fn test_iarna_toml_spec_tests() {
 							// NOTE there's known errors with the python convention method.
 							// For now we just ignore them as it's a broken tool - not a wrong test-case.
 							// Uncomment this print to see/check them.
-							// eprintln(err.msg() + '\n$contents')
+							// eprintln(err.msg() + '\n${contents}')
 							e++
 							println('ERR  [${i + 1}/${valid_test_files.len}] "${valid_test_file}" EXCEPTION [${e}/${valid_value_exceptions.len}]...')
 							continue
@@ -193,8 +194,10 @@ fn test_iarna_toml_spec_tests() {
 				}
 				toml_doc := toml.parse_file(valid_test_file)!
 
-				v_toml_json_path := os.join_path(compare_work_dir_root, '${valid_test_file_name}.v.json')
-				iarna_toml_json_path := os.join_path(compare_work_dir_root, '${valid_test_file_name}.json')
+				v_toml_json_path := os.join_path(compare_work_dir_root,
+					'${valid_test_file_name}.v.json')
+				iarna_toml_json_path := os.join_path(compare_work_dir_root,
+					'${valid_test_file_name}.json')
 
 				os.write_file(v_toml_json_path, to_iarna(toml_doc.ast.table, converted_from_yaml))!
 
@@ -292,8 +295,7 @@ fn to_iarna(value ast.Value, skip_value_map bool) string {
 		}
 		ast.DateTime {
 			// Normalization for json
-			mut json_text := json2.Any(value.text).json_str().to_upper().replace(' ',
-				'T')
+			mut json_text := json2.Any(value.text).json_str().to_upper().replace(' ', 'T')
 			typ := if json_text.ends_with('Z"') || json_text.all_after('T').contains('-')
 				|| json_text.all_after('T').contains('+') {
 				'datetime'
@@ -302,7 +304,7 @@ fn to_iarna(value ast.Value, skip_value_map bool) string {
 			}
 			// NOTE test suite inconsistency.
 			// It seems it's implementation specific how time and
-			// date-time values are represented in detail. For now we follow the BurntSushi format
+			// date-time values are represented in detail. For now we follow the toml-lang format
 			// that expands to 6 digits which is also a valid RFC 3339 representation.
 			json_text = to_iarna_time(json_text[1..json_text.len - 1])
 			if skip_value_map {
@@ -342,7 +344,8 @@ fn to_iarna(value ast.Value, skip_value_map bool) string {
 		}
 		ast.Number {
 			if value.text.contains('inf') {
-				mut json_text := value.text.replace('inf', '1.7976931348623157e+308') // Inconsistency ???
+				mut json_text :=
+					value.text.replace('inf', '1.7976931348623157e+308') // Inconsistency ???
 				if skip_value_map {
 					return '${json_text}'
 				}
@@ -367,13 +370,6 @@ fn to_iarna(value ast.Value, skip_value_map bool) string {
 				return '{ "type": "float", "value": "${val}" }'
 			}
 			v := value.i64()
-			// TODO: workaround https://github.com/vlang/v/issues/9507
-			if v == i64(-9223372036854775807 - 1) {
-				if skip_value_map {
-					return '-9223372036854775808'
-				}
-				return '{ "type": "integer", "value": "-9223372036854775808" }'
-			}
 			if skip_value_map {
 				return '${v}'
 			}
@@ -399,5 +395,6 @@ fn to_iarna(value ast.Value, skip_value_map bool) string {
 			return str
 		}
 	}
+
 	return '<error>'
 }

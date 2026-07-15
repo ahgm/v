@@ -100,6 +100,7 @@ fn (mut pc PkgConfig) setvar(line string) {
 
 fn (mut pc PkgConfig) parse(file string) bool {
 	pc.file_path = file
+	pc.vars['pcfiledir'] = os.real_path(os.dir(file))
 	data := os.read_file(file) or { return false }
 	if pc.options.debug {
 		eprintln(data)
@@ -179,7 +180,7 @@ pub fn (mut pc PkgConfig) atleast(v string) bool {
 	return v0 > v1
 }
 
-pub fn (mut pc PkgConfig) extend(pcdep &PkgConfig) !string {
+pub fn (mut pc PkgConfig) extend(pcdep &PkgConfig) string {
 	for flag in pcdep.cflags {
 		if pc.cflags.index(flag) == -1 {
 			pc.cflags << flag
@@ -195,7 +196,7 @@ pub fn (mut pc PkgConfig) extend(pcdep &PkgConfig) !string {
 			pc.libs_private << lib
 		}
 	}
-	return error('')
+	return ''
 }
 
 fn (mut pc PkgConfig) load_requires() ! {
@@ -228,7 +229,7 @@ fn (mut pc PkgConfig) load_require(dep string) ! {
 	if !pc.options.norecurse {
 		pcdep.load_requires()!
 	}
-	pc.extend(pcdep) or {}
+	pc.extend(pcdep)
 }
 
 fn (mut pc PkgConfig) add_path(path string) {

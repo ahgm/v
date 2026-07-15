@@ -16,11 +16,11 @@ import hash
 // │ ├── README.md <-- a short description of the folder's purpose.
 // │ ├── 0f
 // │ │   ├── 0f004f983ab9c487b0d7c1a0a73840a5.txt
-// │ │   ├── 0f599edf5e16c2756fbcdd4c865087ac.description.txt <-- build details
+// │ │   ├── 0f599edf5e16c2756fbcdd4c865087ac.output.description.txt <-- build details
 // │ │   └── 0f599edf5e16c2756fbcdd4c865087ac.vh
 // │ ├── 29
 // │ │   ├── 294717dd02a1cca5f2a0393fca2c5c22.o
-// │ │   └── 294717dd02a1cca5f2a0393fca2c5c22.description.txt <-- build details
+// │ │   └── 294717dd02a1cca5f2a0393fca2c5c22.output.description.txt <-- build details
 // │ ├── 62
 // │ │   └── 620d60d6b81fdcb3cab030a37fd86996.h
 // │ └── 76
@@ -49,7 +49,8 @@ fn remove_old_cache_folder() {
 pub fn new_cache_manager(opts []string) CacheManager {
 	// use a path, that would not conflict with a user installable module. `import .cache` is not valid, => better than just `cache`:
 	vcache_basepath := os.getenv_opt('VCACHE') or { os.join_path(os.vmodules_dir(), '.cache') }
-	nlog(@FN, 'vcache_basepath: ${vcache_basepath}\n         opts: ${opts}\n      os.args: ${os.args.join(' ')}')
+	nlog(@FN,
+		'vcache_basepath: ${vcache_basepath}\n         opts: ${opts}\n      os.args: ${os.args.join(' ')}')
 	dlog(@FN, 'vcache_basepath: ${vcache_basepath} | opts:\n     ${opts}')
 	if !os.is_dir(vcache_basepath) {
 		remove_old_cache_folder()
@@ -86,6 +87,7 @@ pub fn new_cache_manager(opts []string) CacheManager {
 // without affecting the .original_vopts
 pub fn (mut cm CacheManager) set_temporary_options(new_opts []string) {
 	cm.vopts = cm.original_vopts + '#' + new_opts.join('|')
+	cm.k2cpath = map[string]string{}
 	dlog(@FN, 'cm.vopts:\n     ${cm.vopts}')
 }
 

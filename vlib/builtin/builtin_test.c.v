@@ -13,8 +13,20 @@ fn test_g_main_argv() {
 	assert first_arg.contains('builtin_test')
 }
 
+fn test_c_strstr_is_declared() {
+	found := unsafe { C.strstr(c'hello world', c'world') } != unsafe { nil }
+	assert found
+}
+
 @[if windows]
 fn test_bool_size() {
 	println(@LOCATION)
 	assert sizeof(C.BOOL) == 4
+}
+
+fn test_v_getpid__and__v_gettid() {
+	p := v_getpid()
+	dump(p)
+	t := v_gettid()
+	dump(t)
 }

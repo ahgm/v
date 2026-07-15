@@ -2,7 +2,7 @@
 // Use of this source code is governed by an MIT license
 // that can be found in the LICENSE file.
 import net.http
-import x.json2
+import json2
 import sync.pool
 
 struct Story {
@@ -10,7 +10,7 @@ struct Story {
 	url   string
 }
 
-fn worker_fetch(mut p pool.PoolProcessor, cursor int, worker_id int) voidptr {
+fn worker_fetch(mut p pool.PoolProcessor, cursor int, _worker_id int) voidptr {
 	id := p.get_item[int](cursor)
 	resp := http.get('https://hacker-news.firebaseio.com/v0/item/${id}.json') or {
 		println('failed to fetch data from /v0/item/${id}.json')
@@ -18,7 +18,6 @@ fn worker_fetch(mut p pool.PoolProcessor, cursor int, worker_id int) voidptr {
 	}
 	story := json2.decode[Story](resp.body) or {
 		println('failed to decode a story')
-		// println(resp.body)
 		return pool.no_result
 	}
 	println('# ${cursor + 1}) ${story.title} | ${story.url}')
@@ -31,14 +30,12 @@ fn main() {
 		println('failed to fetch data from /v0/topstories.json')
 		return
 	}
-	// TODO bring back once json2 can decode []int
-	/*
+
 	ids := json2.decode[[]int](resp.body) or {
-		println('failed to decode topstories.json $err')
+		println('failed to decode topstories.json ${err}')
 		return
-	}#[0..10]
-	*/
-	ids := resp.body.replace_once('[', '').replace_once(']', '').split(',').map(it.int())#[0..30]
+	}#[0..30]
+
 	mut fetcher_pool := pool.new_pool_processor(
 		callback: worker_fetch
 	)

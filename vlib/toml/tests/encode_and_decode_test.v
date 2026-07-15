@@ -65,6 +65,18 @@ struct AnyArr {
 	arr []toml.Any
 }
 
+struct Item {
+	name string
+}
+
+struct Doc {
+	items []Item
+}
+
+struct MapDoc {
+	items map[string]Item
+}
+
 fn test_encode_and_decode() {
 	// *¹
 	// p := Pet{'Mr. Scratchy McEvilPaws', ['Freddy', 'Fred', 'Charles'], 8, -1, 0.8, true, .manager, Address{'1428 Elm Street', 'Springwood'}, Contact{'123-456-7890'}}
@@ -279,6 +291,58 @@ times = [
 	assert toml.decode[AnyArr](any_s)!.arr.map(it.int()) == [10, 20, 30]
 }
 
+fn test_array_of_struct_decode() {
+	doc := Doc{
+		items: [
+			Item{
+				name: 'item #1'
+			},
+			Item{
+				name: 'item #2'
+			},
+			Item{
+				name: 'item #3'
+			},
+		]
+	}
+
+	encoded := toml.encode[Doc](doc)
+	assert toml.decode[Doc](encoded)! == doc
+
+	array_of_tables := '[[items]]
+name = "item #1"
+
+[[items]]
+name = "item #2"
+
+[[items]]
+name = "item #3"'
+	assert toml.decode[Doc](array_of_tables)! == doc
+}
+
+fn test_map_of_struct_decode() {
+	doc := MapDoc{
+		items: {
+			'first':  Item{
+				name: 'first one'
+			}
+			'second': Item{
+				name: 'second one'
+			}
+		}
+	}
+
+	encoded := toml.encode[MapDoc](doc)
+	assert toml.decode[MapDoc](encoded)! == doc
+
+	table_doc := '[items.first]
+name = "first one"
+
+[items.second]
+name = "second one"'
+	assert toml.decode[MapDoc](table_doc)! == doc
+}
+
 fn test_decode_doc() {
 	doc := toml.parse_text('name = "Peter"
 age = 28
@@ -325,4 +389,15 @@ fn test_unsupported_type() {
 	} else {
 		assert err.msg() == 'Doc.decode: expected struct, found string'
 	}
+}
+
+fn test_date_array_decode_with_spaces() {
+	// test space after yyyy-mm-dd is not date-time separator but white to consume. issue # 25279
+	s := '
+dates = [ 1979-05-27    , 2022-12-31    ]
+'
+	a := Arrs{
+		dates: [toml.Date{'1979-05-27'}, toml.Date{'2022-12-31'}]
+	}
+	assert toml.decode[Arrs](s)! == a
 }

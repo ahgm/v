@@ -190,21 +190,20 @@ pub fn chunk_while[T](a []T, predicate fn (before T, after T) bool) [][]T {
 		return []
 	}
 	mut chunks := [][]T{}
-	mut chunk := [a[0]]
+	mut current := [a[0]]
 	mut i := 0
 	for i = 1; i < a.len; i++ {
-		// eprintln('> i: ${i} | a[i]: ${a[i]} | predicate: ${predicate(a[i-1], a[i]):10} | chunk: ${chunk}')
 		if predicate(a[i - 1], a[i]) {
-			chunk << a[i]
+			current << a[i]
 			continue
 		}
-		if chunk.len > 0 {
-			chunks << chunk
+		if current.len > 0 {
+			chunks << current
 		}
-		chunk = [a[i]]
+		current = [a[i]]
 	}
-	if chunk.len > 0 {
-		chunks << chunk
+	if current.len > 0 {
+		chunks << current
 	}
 	return chunks
 }
@@ -322,18 +321,19 @@ pub fn filter_indexed[T](array []T, predicate fn (idx int, elem T) bool) []T {
 // assert r == 5
 // ```
 pub fn fold[T, R](array []T, init R, fold_op fn (acc R, elem T) R) R {
-	mut value := R{}
 	$if R is $array {
-		value = init.clone()
+		mut value := init.clone()
+		for e in array {
+			value = fold_op(value, e)
+		}
+		return value
 	} $else {
-		value = init
+		mut value := init
+		for e in array {
+			value = fold_op(value, e)
+		}
+		return value
 	}
-
-	for e in array {
-		value = fold_op(value, e)
-	}
-
-	return value
 }
 
 // fold_indexed sets `acc = init`, then successively calls `acc = fold_op(idx, acc, elem)` for each element in `array`.
@@ -519,7 +519,7 @@ pub fn binary_search[T](array []T, target T) !int {
 pub fn rotate_left[T](mut array []T, mid int) {
 	assert mid <= array.len && mid >= 0
 	k := array.len - mid
-	p := &T(array.data)
+	p := unsafe { &T(array.data) }
 	unsafe {
 		ptr_rotate[T](mid, &T(usize(voidptr(p)) + usize(sizeof(T)) * usize(mid)), k)
 	}
@@ -538,7 +538,7 @@ pub fn rotate_left[T](mut array []T, mid int) {
 pub fn rotate_right[T](mut array []T, k int) {
 	assert k <= array.len && k >= 0
 	mid := array.len - k
-	p := &T(array.data)
+	p := unsafe { &T(array.data) }
 	unsafe {
 		ptr_rotate[T](mid, &T(usize(voidptr(p)) + usize(sizeof(T)) * usize(mid)), k)
 	}
@@ -633,7 +633,7 @@ fn memswap(x voidptr, y voidptr, len usize) {
 		unsafe {
 			vmemcpy(t, voidptr(xi), block_size)
 			vmemcpy(voidptr(xi), voidptr(yi), block_size)
-			vmemcpy(t, voidptr(yi), block_size)
+			vmemcpy(voidptr(yi), t, block_size)
 		}
 		i += usize(block_size)
 	}
@@ -666,19 +666,19 @@ fn swap_nonoverlapping[T](x_ &T, y_ &T, count int) {
 // The number of the elements copied is the minimum of the length of both arrays.
 // Returns the number of elements copied.
 pub fn copy[T](mut dst []T, src []T) int {
-	min := if dst.len < src.len { dst.len } else { src.len }
-	if min <= 0 {
+	min_len := if dst.len < src.len { dst.len } else { src.len }
+	if min_len <= 0 {
 		return 0
 	}
 	if can_copy_bits[T]() {
-		blen := min * isize(sizeof(T))
+		blen := min_len * isize(sizeof(T))
 		unsafe { vmemmove(&T(dst.data), src.data, blen) }
 	} else {
-		for i in 0 .. min {
+		for i in 0 .. min_len {
 			dst[i] = src[i]
 		}
 	}
-	return min
+	return min_len
 }
 
 // can_copy_bits determines if T can be copied using `memcpy`.

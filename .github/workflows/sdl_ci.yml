@@ -3,8 +3,11 @@ name: sdl CI
 on:
   workflow_dispatch:
   push:
+    branches:
+      - master
     paths:
       - 'vlib/**'
+      - '!vlib/v3/**'
       - 'thirdparty/**'
       - 'cmd/tools/builders/**.v'
       - 'cmd/tools/vshader.v'
@@ -13,6 +16,7 @@ on:
   pull_request:
     paths:
       - 'vlib/**'
+      - '!vlib/v3/**'
       - 'thirdparty/**'
       - 'cmd/tools/builders/**.v'
       - 'cmd/tools/vshader.v'
@@ -26,11 +30,12 @@ concurrency:
 jobs:
   v-compiles-sdl-examples:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     env:
       VFLAGS: -cc tcc
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cache-apt-packages-action
       - name: Build V
         run: make && sudo ./v symlink
 

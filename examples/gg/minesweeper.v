@@ -108,6 +108,7 @@ fn on_event(e &gg.Event, mut g Game) {
 			.r { g.restart() }
 			else {}
 		}
+
 		return
 	}
 	if g.game_over {
@@ -197,7 +198,7 @@ fn on_frame(mut g Game) {
 			g.draw_cell(y, x)
 		}
 	}
-	message := 'Flagged: ${g.mines_flagged:02}/${g.mines:02}               (r)estart (ESC)ape'
+	message := 'Flagged: ${g.mines_flagged:02}/${g.mines:02}         (r)estart (ESC)ape'
 	g.ctx.draw_text(5, 7, message, color: gg.green)
 	g.ctx.end()
 }

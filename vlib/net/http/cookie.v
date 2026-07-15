@@ -54,9 +54,11 @@ pub fn read_cookies(h Header, filter string) []&Cookie {
 		mut line := line_.trim_space()
 		mut part := ''
 		for line.len > 0 {
-			mut semicolon_position := line.index_any(';') // Store the position of the next semicolon
+			mut semicolon_position :=
+				line.index_any(';') // Store the position of the next semicolon
 			if semicolon_position > 0 { // So, there is a semicolon, let's parse until that position
-				line_parts := line[..semicolon_position].split(';') // split the line only until that semicolon
+				line_parts :=
+					line[..semicolon_position].split(';') // split the line only until that semicolon
 				line = line[(semicolon_position + 1)..] // and then skip everything before the semicolon
 				part = line_parts[0]
 			} else {
@@ -155,6 +157,7 @@ pub fn (c &Cookie) str() string {
 			b.write_string('; SameSite=Strict')
 		}
 	}
+
 	return b.str()
 }
 
@@ -192,8 +195,9 @@ pub fn sanitize_cookie_value(v string) string {
 	if v.len == 0 {
 		return v
 	}
-	// Check for the existence of a space or comma
-	if val.starts_with(' ') || val.ends_with(' ') || val.starts_with(',') || val.ends_with(',') {
+	// Check for the existence of a space, comma or semicolon
+	if val.starts_with(' ') || v.contains(';') || val.ends_with(' ') || val.starts_with(',')
+		|| val.ends_with(',') {
 		return '"${v}"'
 	}
 	return v

@@ -1,4 +1,5 @@
 import common { Task, exec }
+import os
 
 fn test_symlink() {
 	exec('v symlink')
@@ -17,7 +18,8 @@ fn all_code_is_formatted() {
 	if common.is_github_job {
 		exec('VJOBS=1 v -silent test-cleancode')
 	} else {
-		exec('v -progress test-cleancode')
+		vjobs := os.getenv_opt('VJOBS') or { '1' }
+		exec('VJOBS=${vjobs} v -progress test-cleancode')
 	}
 }
 
@@ -38,7 +40,11 @@ fn verify_v_test_works() {
 }
 
 fn install_iconv() {
-	exec('brew install libiconv')
+	// Skip Homebrew when iconv is already linkable for V on this machine.
+	if os.system('v -silent test vlib/encoding/iconv/') == 0 {
+		return
+	}
+	exec('brew list --versions libiconv >/dev/null 2>&1 || brew install libiconv')
 }
 
 fn test_pure_v_math_module() {
@@ -49,13 +55,14 @@ fn self_tests() {
 	if common.is_github_job {
 		exec('VJOBS=1 v -silent test-self vlib')
 	} else {
-		exec('v -progress test-self vlib')
+		vjobs := os.getenv_opt('VJOBS') or { '1' }
+		exec('VJOBS=${vjobs} v -progress test-self vlib')
 	}
 }
 
 fn build_examples() {
 	if common.is_github_job {
-		exec('v -silent build-examples')
+		exec('v build-examples')
 	} else {
 		exec('v -progress build-examples')
 	}
@@ -64,8 +71,7 @@ fn build_examples() {
 fn build_examples_v_compiled_with_tcc() {
 	exec('v -o vtcc -cc tcc cmd/v')
 	if common.is_github_job {
-		// ensure that examples/veb/veb_example.v etc compiles
-		exec('./vtcc -silent build-examples')
+		exec('./vtcc build-examples')
 	} else {
 		exec('./vtcc -progress build-examples')
 	}
@@ -98,7 +104,10 @@ fn build_v_with_prealloc() {
 }
 
 fn v_self_compilation_usecache() {
-	exec('unset VFLAGS')
+	$if !enable_usecache_test ? {
+		eprintln('> ${@LOCATION} use `-d enable_usecache_test` in VFLAGS to enable this task')
+		return
+	}
 	exec('v -usecache examples/hello_world.v')
 	exec('./examples/hello_world')
 	exec('v -o v2 -usecache cmd/v')
@@ -120,6 +129,10 @@ fn test_password_input() {
 
 fn test_readline() {
 	exec('v -silent test examples/readline/')
+}
+
+fn test_inline_assembly() {
+	exec('v test vlib/v/slow_tests/assembly')
 }
 
 const all_tasks = {
@@ -144,6 +157,7 @@ const all_tasks = {
 	'v_self_compilation_parallel_cc':     Task{v_self_compilation_parallel_cc, 'V self compilation with -parallel-cc'}
 	'test_password_input':                Task{test_password_input, 'Test password input'}
 	'test_readline':                      Task{test_readline, 'Test readline'}
+	'test_inline_assembly':               Task{test_inline_assembly, 'Test inline assembly'}
 }
 
 common.run(all_tasks)

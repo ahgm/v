@@ -231,8 +231,8 @@ fn test_acosh() {
 		f := acosh(a)
 		assert veryclose(acosh_[i], f)
 	}
-	vfacosh_sc_ := [inf(-1), 0.5, 1, inf(1), nan()]
-	acosh_sc_ := [nan(), nan(), 0, inf(1), nan()]
+	vfacosh_sc_ := [inf(-1), 0.5, 0.0, 1, inf(1), nan()]
+	acosh_sc_ := [nan(), nan(), nan(), 0, inf(1), nan()]
 	for i := 0; i < vfacosh_sc_.len; i++ {
 		f := acosh(vfacosh_sc_[i])
 		assert alike(acosh_sc_[i], f)
@@ -658,10 +658,11 @@ fn test_hypot() {
 		[inf(1), inf(-1)], [inf(1), 0], [inf(1), inf(1)], [inf(1),
 			nan()],
 		[nan(), inf(-1)], [nan(), 0], [nan(), inf(1)], [nan(),
-			nan()]]
+			nan()],
+		[-0.0, max_f64]]
 	hypot_sc_ := [inf(1), inf(1), inf(1), inf(1), 0, 0, 0, 0, inf(1),
 		inf(1), nan(), inf(1), inf(1), inf(1), inf(1), inf(1),
-		nan(), inf(1), nan()]
+		nan(), inf(1), nan(), max_f64]
 	for i := 0; i < vfhypot_sc_.len; i++ {
 		f := hypot(vfhypot_sc_[i][0], vfhypot_sc_[i][1])
 		assert alike(hypot_sc_[i], f)
@@ -847,7 +848,8 @@ fn test_round() {
 		f := round(vf_[i])
 		assert alike(round_[i], f)
 	}
-	vfround_sc_ := [[f64(0), 0], [nan(), nan()], [inf(1), inf(1)]]
+	vfround_sc_ := [[f64(0), 0], [-0.5, -1.0], [nan(), nan()],
+		[inf(1), inf(1)]]
 	// vfround_even_sc_ := [[f64(0), 0], [f64(1.390671161567e-309), 0], // denormal
 	// 	[f64(0.49999999999999994), 0], // 0.5-epsilon [f64(0.5), 0],
 	// 	[f64(0.5000000000000001), 1], // 0.5+epsilon [f64(-1.5), -2],
@@ -1118,7 +1120,11 @@ fn test_min_max_int_str() {
 fn test_maxof_minof() {
 	assert maxof[i8]() == 127
 	assert maxof[i16]() == 32767
-	assert maxof[int]() == 2147483647
+	assert maxof[int]() == $if new_int ? && x64 {
+		9223372036854775807
+	} $else {
+		2147483647
+	}
 	assert maxof[i32]() == 2147483647
 	assert maxof[i64]() == 9223372036854775807
 	assert maxof[u8]() == 255
@@ -1130,7 +1136,11 @@ fn test_maxof_minof() {
 
 	assert minof[i8]() == -128
 	assert minof[i16]() == -32768
-	assert minof[int]() == -2147483648
+	assert minof[int]() == $if new_int ? && x64 {
+		-9223372036854775807 - 1
+	} $else {
+		-2147483648
+	}
 	assert minof[i32]() == -2147483648
 	assert minof[i64]() == -9223372036854775807 - 1
 	assert minof[u8]() == 0

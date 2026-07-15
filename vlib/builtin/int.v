@@ -42,14 +42,14 @@ pub const max_i16 = i16(32767)
 pub const min_i32 = i32(-2147483648)
 pub const max_i32 = i32(2147483647)
 
-pub const min_int = int(-2147483648)
-pub const max_int = int(2147483647)
-
 // -9223372036854775808 is wrong, because C compilers parse literal values
 // without sign first, and 9223372036854775808 overflows i64, hence the
 // consecutive subtraction by 1
 pub const min_i64 = i64(-9223372036854775807 - 1)
 pub const max_i64 = i64(9223372036854775807)
+
+pub const min_int = $if new_int ? && x64 { int(min_i64) } $else { int(min_i32) }
+pub const max_int = $if new_int ? && x64 { int(max_i64) } $else { int(max_i32) }
 
 pub const min_u8 = u8(0)
 pub const max_u8 = u8(255)
@@ -72,6 +72,17 @@ fn (nn int) str_l(max int) string {
 		mut d := 0
 		if n == 0 {
 			return '0'
+		}
+
+		// overflow protect
+		$if new_int ? && x64 {
+			if n == min_i64 {
+				return '-9223372036854775808'
+			}
+		} $else {
+			if n == min_i32 {
+				return '-2147483648'
+			}
 		}
 
 		mut is_neg := false
@@ -114,23 +125,23 @@ fn (nn int) str_l(max int) string {
 // str returns the value of the `i8` as a `string`.
 // Example: assert i8(-2).str() == '-2'
 pub fn (n i8) str() string {
-	return int(n).str_l(5)
+	return int(n).str_l(4)
 }
 
 // str returns the value of the `i16` as a `string`.
 // Example: assert i16(-20).str() == '-20'
 pub fn (n i16) str() string {
-	return int(n).str_l(7)
+	return int(n).str_l(6)
 }
 
 // str returns the value of the `u16` as a `string`.
 // Example: assert u16(20).str() == '20'
 pub fn (n u16) str() string {
-	return int(n).str_l(7)
+	return int(n).str_l(6)
 }
 
 pub fn (n i32) str() string {
-	return int(n).str_l(12)
+	return int(n).str_l(11)
 }
 
 pub fn (nn int) hex_full() string {
@@ -140,7 +151,11 @@ pub fn (nn int) hex_full() string {
 // str returns the value of the `int` as a `string`.
 // Example: assert int(-2020).str() == '-2020'
 pub fn (n int) str() string {
-	return n.str_l(12)
+	$if new_int ? {
+		return impl_i64_to_string(n)
+	} $else {
+		return n.str_l(11)
+	}
 }
 
 // str returns the value of the `u32` as a `string`.
@@ -153,7 +168,7 @@ pub fn (nn u32) str() string {
 		if n == 0 {
 			return '0'
 		}
-		max := 12
+		max := 10
 		mut buf := malloc_noscan(max + 1)
 		mut index := max
 		buf[index] = 0
@@ -162,10 +177,10 @@ pub fn (nn u32) str() string {
 			n1 := n / u32(100)
 			d = ((n - (n1 * u32(100))) << u32(1))
 			n = n1
-			buf[index] = digit_pairs[d]
+			buf[index] = digit_pairs[int(d)]
 			index--
 			d++
-			buf[index] = digit_pairs[d]
+			buf[index] = digit_pairs[int(d)]
 			index--
 		}
 		index++
@@ -216,10 +231,10 @@ fn impl_i64_to_string(nn i64) string {
 			n1 := n / i64(100)
 			d = (u32(n - (n1 * i64(100))) << i64(1))
 			n = n1
-			buf[index] = digit_pairs[d]
+			buf[index] = digit_pairs[int(d)]
 			index--
 			d++
-			buf[index] = digit_pairs[d]
+			buf[index] = digit_pairs[int(d)]
 			index--
 		}
 		index++
@@ -257,10 +272,10 @@ pub fn (nn u64) str() string {
 			n1 := n / 100
 			d = ((n - (n1 * 100)) << 1)
 			n = n1
-			buf[index] = digit_pairs[d]
+			buf[index] = digit_pairs[int(d)]
 			index--
 			d++
-			buf[index] = digit_pairs[d]
+			buf[index] = digit_pairs[int(d)]
 			index--
 		}
 		index++
@@ -327,6 +342,22 @@ pub fn (nn u8) hex() string {
 		return '00'
 	}
 	return u64_to_hex(nn, 2)
+}
+
+// hex returns a hexadecimal representation of `c` (as an 8 bit unsigned number).
+// The output is zero padded for values below 16.
+// Example: assert char(`A`).hex() == '41'
+// Example: assert char(`Z`).hex() == '5a'
+// Example: assert char(` `).hex() == '20'
+pub fn (c char) hex() string {
+	return u8(c).hex()
+}
+
+// hex returns a hexadecimal representation of the rune `r` (as a 32 bit unsigned number).
+// Example: assert `A`.hex() == '41'
+// Example: assert `💣`.hex() == '1f4a3'
+pub fn (r rune) hex() string {
+	return u32(r).hex()
 }
 
 // hex returns the value of the `i8` as a hexadecimal `string`.
@@ -474,7 +505,7 @@ pub fn (nn u64) hex_full() string {
 // See also: [`byte.ascii_str`](#byte.ascii_str)
 // Example: assert u8(111).str() == '111'
 pub fn (b u8) str() string {
-	return int(b).str_l(7)
+	return int(b).str_l(4)
 }
 
 // ascii_str returns the contents of `byte` as a zero terminated ASCII `string` character.
@@ -488,7 +519,6 @@ pub fn (b u8) ascii_str() string {
 		str.str[0] = b
 		str.str[1] = 0
 	}
-	// println(str)
 	return str
 }
 
@@ -534,6 +564,7 @@ pub fn (b u8) str_escaped() string {
 			yy
 		}
 	}
+
 	return str
 }
 
@@ -577,7 +608,7 @@ pub fn (b u8) repeat(count int) string {
 	mut bytes := unsafe { malloc_noscan(count + 1) }
 	unsafe {
 		vmemset(bytes, b, count)
-		bytes[count] = `0`
+		bytes[count] = 0
 	}
 	return unsafe { bytes.vstring_with_len(count) }
 }

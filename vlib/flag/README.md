@@ -21,6 +21,7 @@ Its main features are:
 - parses flags like `-f` or `--flag` or `--stuff=things` or `--things stuff`.
 - handles bool, int, float and string args.
 - can flexibly generate usage information, listing all the declared flags.
+- shows default values in `FlagParser` usage output for flags declared with parser defaults.
 
 See also the `cli` module, for a more complex command line option parser,
 that supports declaring multiple subcommands each having a separate set of
@@ -67,12 +68,12 @@ fn main() {
 		documentation := flag.to_doc[Config](
 			version: '1.0' // NOTE: this overrides the `@[version: '1.2.3']` struct attribute
 			fields:  {
-				'level':                                    'This is a doc string of the field `level` on struct `Config`'
-				'example':                                  'This is another doc string'
-				'multi':                                    'This flag can be repeated'
-				'-e, --extra':                              'Extra flag that does not exist on the struct, but we want documented (in same format as the others)'
-				'-q, --quiet-and-quite-long-flag <string>': 'This is a flag with a long name'
-				'square':                                   '.____.\n|    |\n|    |\n|____|'
+				'level':                    'This is a doc string of the field `level` on struct `Config`'
+				'example':                  'This is another doc string'
+				'multi':                    'This flag can be repeated'
+				'-e, --extra':              'Not on the struct, with documentation (in same format as the others)'
+				'-q, --long-flag <string>': 'This is a flag with a long name'
+				'square':                   '.____.\n|    |\n|    |\n|____|'
 			}
 		)!
 		println(documentation)
@@ -119,7 +120,7 @@ documentation. The documentation can be tweaked in several ways to suit any spec
 user needs via the `DocConfig` configuration struct or directly via attributes
 on the struct itself and it's fields.
 
-See also `examples/flag/flag_layout_editor.v` for a WYSIWYG editor.
+See also `examples/flag_layout_editor.v` for a WYSIWYG editor.
 
 # Sub commands
 
@@ -211,3 +212,8 @@ fn main() {
 	println(additional_args.join_lines())
 }
 ```
+
+When you need to distinguish between "flag not provided" and a falsey/default value,
+pass a typed option default. For example,
+`fp.bool('a_bool', 0, ?bool(none), '...')` returns `?bool`, and
+`fp.string('a_string', 0, ?string(none), '...')` returns `?string`.

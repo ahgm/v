@@ -2,9 +2,9 @@ import arrays
 
 #insert "@VEXEROOT/vlib/v/tests/c_array_test.c"
 
-fn C.gen_c_array(size int) voidptr
+fn C.gen_c_array(size i32) voidptr
 
-fn C.gen_c_int_array(size int) voidptr
+fn C.gen_c_int_array(size i32) voidptr
 
 fn test_carray_to_varray() {
 	size := 10
@@ -17,7 +17,7 @@ fn test_carray_to_varray() {
 	}
 
 	c_int_array := C.gen_c_int_array(size)
-	v_int_array := unsafe { arrays.carray_to_varray[int](c_int_array, size) }
+	v_int_array := unsafe { arrays.carray_to_varray[i32](c_int_array, size) }
 	unsafe { C.free(c_int_array) }
 	assert v_int_array.len == size
 	for i, elem in v_int_array {

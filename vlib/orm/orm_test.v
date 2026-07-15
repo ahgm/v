@@ -1,17 +1,19 @@
 // vtest retry: 3
-// vtest build: !windows
+// vtest build: present_sqlite3? && !windows
 // import db.mysql
 // import db.pg
+import orm
 import time
 import db.sqlite
 
 const offset_const = 2
 
+@[index: 'name, nr_downloads']
 struct Module {
-	id           int @[primary; sql: serial]
-	name         string
+	id           int    @[primary; sql: serial]
+	name         string @[index]
 	nr_downloads int
-	test_id      u64
+	test_id      u64 @[index]
 	user         ?User
 	created      time.Time
 }
@@ -20,7 +22,7 @@ struct Module {
 struct User {
 	id              int @[primary; sql: serial]
 	age             int
-	name            string @[sql: 'username']
+	name            string @[default: 'name'; sql: 'username']
 	is_customer     bool
 	skipped_string  string   @[skip]
 	skipped_string2 string   @[sql: '-']
@@ -35,6 +37,11 @@ struct Foo {
 struct TestTime {
 	id     int @[primary; sql: serial]
 	create time.Time
+}
+
+struct SelectTransformUser {
+	id   int    @[primary; sql: serial]
+	name string @[sql_select: 'upper(name)']
 }
 
 fn test_use_struct_field_as_limit() {
@@ -71,6 +78,125 @@ fn test_use_struct_field_as_limit() {
 	assert users[0].skipped_string2 == ''
 	assert users[0].skipped_array == [], 'skipped because of the @[skip] tag, used for both sql and json'
 	assert users[0].skipped_array2 == [], "should be skipped, because of the sql specific @[sql: '-'] tag"
+}
+
+fn test_orm_sql_select_attribute() {
+	mut db := sqlite.connect(':memory:') or { panic(err) }
+	defer {
+		db.close() or {}
+	}
+
+	sql db {
+		create table SelectTransformUser
+	}!
+
+	alice := SelectTransformUser{
+		name: 'Alice'
+	}
+
+	sql db {
+		insert alice into SelectTransformUser
+	}!
+
+	rows := sql db {
+		select from SelectTransformUser where id == 1
+	}!
+
+	assert rows.len == 1
+	assert rows[0].name == 'ALICE'
+
+	mut qb := orm.new_query[SelectTransformUser](db)
+	qb_rows := qb.query()!
+
+	assert qb_rows.len == 1
+	assert qb_rows[0].name == 'ALICE'
+}
+
+fn test_orm_select_specific_fields() {
+	mut db := sqlite.connect(':memory:') or { panic(err) }
+	defer {
+		db.close() or {}
+	}
+
+	sql db {
+		create table User
+		create table SelectTransformUser
+	}!
+
+	sam := User{
+		age:  29
+		name: 'Sam'
+	}
+	alice := SelectTransformUser{
+		name: 'Alice'
+	}
+
+	sql db {
+		insert sam into User
+		insert alice into SelectTransformUser
+	}!
+
+	users := sql db {
+		select id, name from User where name == 'Sam'
+	}!
+
+	assert users.len == 1
+	assert users[0].id == 1
+	assert users[0].name == 'Sam'
+	assert users[0].age == 0
+	assert users[0].is_customer == false
+
+	transformed := sql db {
+		select name from SelectTransformUser where id == 1
+	}!
+
+	assert transformed.len == 1
+	assert transformed[0].name == 'ALICE'
+	assert transformed[0].id == 0
+}
+
+fn test_orm_order_by_explicit_asc() {
+	mut db := sqlite.connect(':memory:')!
+	defer {
+		db.close() or { panic(err) }
+	}
+
+	sql db {
+		create table User
+	}!
+
+	users := [
+		User{
+			age:  31
+			name: 'Alice'
+		},
+		User{
+			age:  19
+			name: 'Bob'
+		},
+		User{
+			age:  44
+			name: 'Charlie'
+		},
+	]
+
+	for user in users {
+		sql db {
+			insert user into User
+		}!
+	}
+
+	// vfmt off
+	rows := sql db {
+		select from User order by age asc limit 2
+	}!
+	// vfmt on
+
+	assert rows.len == 2
+	assert rows[0].name == 'Bob'
+	assert rows[0].age == 19
+	assert rows[1].name == 'Alice'
+	assert rows[1].age == 31
 }
 
 fn test_orm() {
@@ -407,4 +533,18 @@ fn test_orm() {
 		drop table Module
 		drop table TestTime
 	}!
+}
+
+fn test_distinct() {
+	db := sqlite.connect(':memory:') or { panic(err) }
+
+	// Create table without unique constraints to allow true duplicates
+	db.exec('CREATE TABLE items (name TEXT, category TEXT)')!
+	db.exec("INSERT INTO items VALUES ('Apple', 'Fruit'), ('Apple', 'Fruit'), ('Banana', 'Fruit')")!
+
+	without_distinct := db.exec('SELECT name, category FROM items')!
+	assert without_distinct.len == 3
+
+	with_distinct := db.exec('SELECT DISTINCT name, category FROM items')!
+	assert with_distinct.len == 2
 }

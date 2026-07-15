@@ -58,6 +58,10 @@ pub fn (mut p Pool) type_struct_info(typ ast.Type) ?StructInfo {
 }
 
 pub fn (mut p Pool) type_size(typ ast.Type) (int, int) {
+	if typ.nr_muls() > 0 {
+		return p.table.pointer_size, p.table.pointer_size
+	}
+
 	ts := p.table.sym(typ)
 	if ts.size != -1 && typ.idx() in p.structs {
 		return ts.size, ts.align
@@ -346,7 +350,9 @@ pub fn (mut p Pool) append(init ast.Expr, typ ast.Type) (int, bool) {
 		}
 		ast.CharLiteral {
 			// 3 extra bytes for improved program correctness, thank me later
-			rne := u32(eval_escape_codes_raw(init.val) or { panic('Pool.append: ${err}') }.runes()[0])
+			rne := u32(ast.char_literal_rune_value(init.val) or {
+				panic('Pool.append: invalid char literal')
+			})
 			pos := p.alignment(4)
 			p.u32(rne)
 
@@ -446,5 +452,6 @@ fn (mut p Pool) ptr(offset int) int {
 		}
 		else {}
 	}
+
 	return pos
 }

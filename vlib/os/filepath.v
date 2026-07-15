@@ -218,18 +218,20 @@ fn clean_path(path string) string {
 
 // to_slash returns the result of replacing each separator character in path with a slash (`/`).
 pub fn to_slash(path string) string {
-	if path_separator == '/' {
-		return path
+	return $if windows {
+		path.replace(path_separator, '/')
+	} $else {
+		path
 	}
-	return path.replace(path_separator, '/')
 }
 
 // from_slash returns the result of replacing each slash (`/`) character is path with a separator character.
 pub fn from_slash(path string) string {
-	if path_separator == '/' {
-		return path
+	return $if windows {
+		path.replace('/', path_separator)
+	} $else {
+		path
 	}
-	return path.replace('/', path_separator)
 }
 
 // win_volume_len returns the length of the
@@ -295,8 +297,9 @@ fn is_normal_path(path string) bool {
 	if plen == 0 {
 		return false
 	}
-	return (plen == 1 && is_slash(path[0])) || (plen >= 2 && is_slash(path[0])
-		&& !is_slash(path[1]))
+	// vfmt off
+	return (plen == 1 && is_slash(path[0])) || (plen >= 2 && is_slash(path[0]) && !is_slash(path[1]))
+	// vfmt on
 }
 
 // is_curr_dir_ref returns `true` if the 3 given integer construct

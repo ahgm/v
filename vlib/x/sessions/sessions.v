@@ -37,11 +37,11 @@ pub fn verify_session_id(raw_sid string, secret []u8) (string, bool) {
 }
 
 // CurrentSession contains the session data during a request.
-// If you use x.vweb you could embed it on your Context struct to have easy access to the session id and data.
+// If you use veb you could embed it on your Context struct to have easy access to the session id and data.
 // Usage example:
 // ```v
 // struct Context {
-//     vweb.Context
+//     veb.Context
 //     sessions.CurrentSessions[User]
 // }
 // ```
@@ -62,9 +62,9 @@ pub:
 	secure      bool
 }
 
-// Sessions can be used to easily integrate sessions with x.vweb.
+// Sessions can be used to easily integrate sessions with veb.
 // This struct contains the store that holds all session data it also provides
-// an easy way to manage sessions in your vweb app.
+// an easy way to manage sessions in your veb app.
 // Usage example:
 // ```v
 // pub struct App {
@@ -93,7 +93,7 @@ pub fn (mut s Sessions[T]) set_session_id[X](mut ctx X) string {
 
 	ctx.set_cookie(http.Cookie{
 		value:     signed
-		max_age:   s.max_age
+		max_age:   int(s.max_age / time.second)
 		domain:    s.cookie_options.domain
 		http_only: s.cookie_options.http_only
 		name:      s.cookie_options.cookie_name
@@ -153,7 +153,7 @@ pub fn (mut s Sessions[T]) save[X](mut ctx X, data T) ! {
 			s.store.set(sid, data)!
 			ctx.CurrentSession.session_data = data
 		}
-		eprintln('[vweb.sessions] error: trying to save data without a valid session!')
+		eprintln('[veb.sessions] error: trying to save data without a valid session!')
 	}
 }
 
@@ -170,15 +170,19 @@ pub fn (mut s Sessions[T]) resave[X](mut ctx X, data T) ! {
 }
 
 // get_session_id retrieves the current session id, if it is set.
+// The HMAC signature is verified when extracting from cookies.
 pub fn (s &Sessions[T]) get_session_id[X](ctx X) ?string {
 	// first check session id from `ctx`
 	sid_from_ctx := ctx.CurrentSession.session_id
 	if sid_from_ctx != '' {
 		return sid_from_ctx
 	} else if cookie := ctx.get_cookie(s.cookie_options.cookie_name) {
-		// check request headers for the session_id cookie
-		a := cookie.split('.')
-		return a[0]
+		// check request headers for the session_id cookie and verify HMAC signature
+		sid, valid := verify_session_id(cookie, s.secret)
+		if valid {
+			return sid
+		}
+		return none
 	} else {
 		// check the Set-Cookie headers on the response for a session id
 		for cookie in ctx.res.cookies() {

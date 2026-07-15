@@ -1,4 +1,4 @@
-// vtest build: !musl?
+// vtest build: !musl? && !sanitized_job?
 import os
 import time
 
@@ -68,10 +68,10 @@ fn test_v_profile_works() {
 	println(@FN)
 	sfile := 'vlib/v/slow_tests/profile/profile_test_1.v'
 	validate_output(@FN, '', sfile, {
-		'arguments':     1
-		'main__main':    1
-		'println':       1
-		'strconv__atoi': 1
+		'builtin__arguments': 1
+		'main__main':         1
+		'builtin__println':   1
+		'strconv__atoi':      1
 	})
 }
 
@@ -79,15 +79,15 @@ fn test_v_profile_on_off_api_works() {
 	println(@FN)
 	sfile := 'vlib/v/slow_tests/profile/profile_test_2.v'
 	res_lines := validate_output(@FN, '', sfile, {
-		'builtin_init': 1
-		'main__main':   1
-		'main__abc':    1
+		'builtin__builtin_init': 1
+		'main__main':            1
+		'main__abc':             1
 	})
 	// test that `-d no_profile_startup` *also* works:
 	res2_lines := validate_output(@FN, '-d no_profile_startup', sfile, {
-		'builtin_init': -1
-		'main__main':   1
-		'main__abc':    1
+		'builtin__builtin_init': -1
+		'main__main':            1
+		'main__abc':             1
 	})
 	assert res_lines.len > res2_lines.len
 	// dump(res2_lines)
@@ -96,23 +96,23 @@ fn test_v_profile_on_off_api_works() {
 fn test_v_profile_fns_option_works() {
 	println(@FN)
 	sfile := 'vlib/v/slow_tests/profile/profile_test_3.v'
-	validate_output(@FN, '-profile-fns println', sfile, {
-		'main__main': -1
-		'main__abc':  -1
-		'main__xyz':  -1
-		'println':    10
+	validate_output(@FN, '-profile-fns builtin__println', sfile, {
+		'main__main':       -1
+		'main__abc':        -1
+		'main__xyz':        -1
+		'builtin__println': 10
 	})
 	validate_output(@FN, '-profile-fns main__abc', sfile, {
-		'main__main': -1
-		'main__abc':  1
-		'main__xyz':  2
-		'println':    10
+		'main__main':       -1
+		'main__abc':        1
+		'main__xyz':        2
+		'builtin__println': 10
 	})
 	validate_output(@FN, '-profile-fns main__xyz', sfile, {
-		'main__main': -1
-		'main__abc':  -1
-		'main__xyz':  2
-		'println':    10
+		'main__main':       -1
+		'main__abc':        -1
+		'main__xyz':        2
+		'builtin__println': 10
 	})
 }
 
@@ -128,7 +128,8 @@ fn validate_output(fn_name string, vopts string, fsource string, expected map[st
 	println('> validating ${fn_name} with: `v ${vopts} -profile - run ${fsource}`')
 	os.chdir(vroot) or {}
 	program_source := os.join_path(vroot, fsource)
-	res := os.execute('${os.quoted_path(vexe)} ${vopts} -profile - run ${os.quoted_path(program_source)}')
+	res :=
+		os.execute('${os.quoted_path(vexe)} ${vopts} -profile - run ${os.quoted_path(program_source)}')
 	assert res.exit_code == 0
 	assert res.output.len > 0
 	res_lines := res.output.split_into_lines()

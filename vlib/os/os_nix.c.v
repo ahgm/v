@@ -1,14 +1,21 @@
 module os
 
-import strings
-
 #include <dirent.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/utsname.h>
 #include <sys/types.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
 #include <utime.h>
+#insert "@VEXEROOT/vlib/os/execute_capture_nix.h"
+
+// short_path is a Windows-only helper that returns the DOS 8.3 short path.
+// On non-Windows platforms it simply returns the given path unchanged,
+// so that callers guarded by `$if windows { ... }` type-check on other targets.
+pub fn short_path(path string) string {
+	return path
+}
 
 // path_separator is the platform specific separator string, used between the folders and filenames in a path. It is '/' on POSIX, and '\\' on Windows.
 pub const path_separator = '/'
@@ -45,24 +52,30 @@ pub const s_iroth = 0o0004 // Read by others
 pub const s_iwoth = 0o0002 // Write by others
 pub const s_ixoth = 0o0001
 
-fn C.utime(&char, &C.utimbuf) int
+fn C.utime(&char, &C.utimbuf) i32
 
-fn C.uname(name &C.utsname) int
+fn C.uname(name &C.utsname) i32
 
-fn C.symlink(&char, &char) int
+fn C.symlink(&char, &char) i32
 
-fn C.link(&char, &char) int
+fn C.readlink(&char, &char, i32) i32
 
-fn C.gethostname(&char, int) int
+fn C.link(&char, &char) i32
+
+fn C.gethostname(&char, i32) i32
 
 // Note: not available on Android fn C.getlogin_r(&char, int) int
 fn C.getlogin() &char
 
-fn C.getppid() int
+fn C.getppid() i32
 
-fn C.getgid() int
+fn C.getgid() i32
 
-fn C.getegid() int
+fn C.getegid() i32
+
+fn C.v_os_execute_capture_start(cmd &char, child_pid &int, read_fd &int) int
+
+fn C.v_os_exec_capture_start(argv &&char, child_pid &int, read_fd &int) int
 
 enum GlobMatch {
 	exact
@@ -140,6 +153,7 @@ fn glob_match(dir string, pattern string, next_pattern string, mut matches []str
 				f.contains(pat)
 			}
 		}
+
 		if hit {
 			if is_dir(fpath) {
 				subdirs << fpath
@@ -199,7 +213,7 @@ fn native_glob_pattern(pattern string, mut matches []string) ! {
 
 // utime changes the access and modification times of the inode specified by path.
 // It returns POSIX error message, if it can not do so.
-pub fn utime(path string, actime int, modtime int) ! {
+pub fn utime(path string, actime i64, modtime i64) ! {
 	u := C.utimbuf{actime, modtime}
 	if C.utime(&char(path.str), &u) != 0 {
 		return error_with_code(posix_get_error_msg(C.errno), C.errno)
@@ -263,14 +277,14 @@ pub fn loginname() !string {
 
 // ls returns ![]string of the files and dirs in the given `path` ( os.ls uses C.readdir ). Symbolic links are returned to be files. For recursive list see os.walk functions.
 // See also: `os.walk`, `os.walk_ext`, `os.is_dir`, `os.is_file`
-// Example: https://github.com/vlang/v/blob/master/examples/readdir.v
+// Example:
 // ```
 //   entries := os.ls(os.home_dir()) or { [] }
 //   for entry in entries {
 //     if os.is_dir(os.join_path(os.home_dir(), entry)) {
-//       println('dir: $entry')
+//       println('dir: ${entry}')
 //     } else {
-//       println('file: $entry')
+//       println('file: ${entry}')
 //     }
 //   }
 // ```
@@ -280,27 +294,27 @@ pub fn ls(path string) ![]string {
 		return error('ls() expects a folder, not an empty string')
 	}
 	mut res := []string{cap: 50}
-	dir := unsafe { C.opendir(&char(path.str)) }
-	if isnil(dir) {
-		return error('ls() couldnt open dir "${path}"')
+	dir_ptr := unsafe { C.opendir(&char(path.str)) }
+	if isnil(dir_ptr) {
+		return error_posix(msg: 'ls() couldnt open dir "${path}"')
 	}
 	mut ent := &C.dirent(unsafe { nil })
-	// mut ent := &C.dirent{!}
 	for {
-		ent = C.readdir(dir)
+		ent = C.readdir(dir_ptr)
 		if isnil(ent) {
 			break
 		}
 		unsafe {
 			bptr := &u8(&ent.d_name[0])
-			if bptr[0] == 0 || (bptr[0] == `.` && bptr[1] == 0)
-				|| (bptr[0] == `.` && bptr[1] == `.` && bptr[2] == 0) {
+			// vfmt off
+			if bptr[0] == 0 || (bptr[0] == `.` && bptr[1] == 0) || (bptr[0] == `.` && bptr[1] == `.` && bptr[2] == 0) {
 				continue
 			}
 			res << tos_clone(bptr)
+			// vfmt on
 		}
 	}
-	C.closedir(dir)
+	C.closedir(dir_ptr)
 	return res
 }
 
@@ -317,37 +331,82 @@ pub fn mkdir(path string, params MkdirParams) ! {
 }
 
 // execute starts the specified command, waits for it to complete, and returns its output.
-@[manualfree]
 pub fn execute(cmd string) Result {
-	pcmd := 'exec 2>&1;${cmd}'
-	defer {
-		unsafe { pcmd.free() }
-	}
-	f := vpopen(pcmd)
-	if isnil(f) {
+	mut pid := 0
+	mut read_fd := -1
+	v_os_execute_lock()
+	rc := C.v_os_execute_capture_start(&char(cmd.str), &pid, &read_fd)
+	v_os_execute_unlock()
+	if rc != 0 {
 		return Result{
 			exit_code: -1
 			output:    'exec("${cmd}") failed'
 		}
 	}
-	fd := fileno(f)
-	mut res := strings.new_builder(1024)
-	defer {
-		unsafe { res.free() }
-	}
-	buf := [4096]u8{}
-	unsafe {
-		pbuf := &buf[0]
-		for {
-			len := C.read(fd, pbuf, 4096)
-			if len == 0 {
-				break
-			}
-			res.write_ptr(pbuf, len)
+	soutput := fd_slurp(read_fd).join('')
+	fd_close(read_fd)
+	mut status := 0
+	for {
+		C.errno = 0
+		if C.waitpid(pid, &status, 0) != -1 {
+			break
+		}
+		if C.errno == C.EINTR {
+			continue
+		}
+		return Result{
+			exit_code: -1
+			output:    soutput
 		}
 	}
-	soutput := res.str()
-	exit_code := vpclose(f)
+	exit_code, _ := posix_wait4_to_exit_status(status)
+	return Result{
+		exit_code: exit_code
+		output:    soutput
+	}
+}
+
+// exec starts the specified command with arguments, waits for it to complete, and returns its output.
+pub fn exec(args []string) Result {
+	if args.len == 0 {
+		return Result{
+			exit_code: -1
+			output:    'exec requires at least one argument'
+		}
+	}
+	mut cargs := []&char{cap: args.len + 1}
+	for arg in args {
+		cargs << &char(arg.str)
+	}
+	cargs << &char(unsafe { nil })
+	mut pid := 0
+	mut read_fd := -1
+	v_os_execute_lock()
+	rc := C.v_os_exec_capture_start(cargs.data, &pid, &read_fd)
+	v_os_execute_unlock()
+	if rc != 0 {
+		return Result{
+			exit_code: -1
+			output:    'exec("${args[0]}") failed'
+		}
+	}
+	soutput := fd_slurp(read_fd).join('')
+	fd_close(read_fd)
+	mut status := 0
+	for {
+		C.errno = 0
+		if C.waitpid(pid, &status, 0) != -1 {
+			break
+		}
+		if C.errno == C.EINTR {
+			continue
+		}
+		return Result{
+			exit_code: -1
+			output:    soutput
+		}
+	}
+	exit_code, _ := posix_wait4_to_exit_status(status)
 	return Result{
 		exit_code: exit_code
 		output:    soutput
@@ -363,59 +422,59 @@ pub fn raw_execute(cmd string) Result {
 	return execute(cmd)
 }
 
-@[manualfree]
-pub fn (mut c Command) start() ! {
-	pcmd := c.path + ' 2>&1'
-	defer {
-		unsafe { pcmd.free() }
-	}
-	c.f = vpopen(pcmd)
-	if isnil(c.f) {
-		return error('exec("${c.path}") failed')
-	}
-}
-
-@[manualfree]
-pub fn (mut c Command) read_line() string {
-	buf := [4096]u8{}
-	mut res := strings.new_builder(1024)
-	defer {
-		unsafe { res.free() }
-	}
-	unsafe {
-		bufbp := &buf[0]
-		for C.fgets(&char(bufbp), 4096, c.f) != 0 {
-			len := vstrlen(bufbp)
-			for i in 0 .. len {
-				if bufbp[i] == `\n` {
-					res.write_ptr(bufbp, i)
-					final := res.str()
-					return final
-				}
-			}
-			res.write_ptr(bufbp, len)
-		}
-	}
-	c.eof = true
-	final := res.str()
-	return final
-}
-
-pub fn (mut c Command) close() ! {
-	c.exit_code = vpclose(c.f)
-	if c.exit_code == 127 {
-		return error_with_code('error', 127)
-	}
-}
-
-// symlink creates a symbolic link named target, which points to origin.
+// symlink creates a symbolic link named link_name, which points to target.
 // It returns a POSIX error message, if it can not do so.
-pub fn symlink(origin string, target string) ! {
-	res := C.symlink(&char(origin.str), &char(target.str))
+pub fn symlink(target string, link_name string) ! {
+	res := C.symlink(&char(target.str), &char(link_name.str))
 	if res == 0 {
 		return
 	}
 	return error(posix_get_error_msg(C.errno))
+}
+
+// readlink reads the target of a symbolic link.
+// It returns a POSIX error message if it can not do so.
+//
+// Note that the target of a symbolic link can be any string:
+// it is often used to point to another path, but the target is not guaranteed
+// to resolve as a path, nor to point to a path that exists.
+@[manualfree]
+pub fn readlink(path string) !string {
+	// Use a region of stack to get information into; we'll return new memory of more precise size later.
+	mut buf := [max_path_buffer_size]u8{}
+	// readlink returns the number of bytes written into buf, or -1 for errors.
+	res := C.readlink(&char(path.str), &char(&buf[0]), max_path_buffer_size)
+	if res < 0 {
+		return last_error()
+	}
+	// Common case: we got a complete read into our buffer on the stack.
+	// In this case, copy the data into a new heap-allocated string that's right-sized
+	// (we can't return memory from our stack).
+	if res < max_path_buffer_size {
+		return unsafe { (&buf[0]).vstring_with_len(res).clone() }
+	}
+	// If the number of bytes read wasn't less than as many as we said we'd accept: that means we might not have gotten a complete read.
+	// In this case, we have to start doing heap allocations, increasingly large, and simply check until we get a complete one.
+	// Whenever we do succeed: we'll return a string that refers to a subset of that possibly excessively sized buffer,
+	// because we're already on the heap and returning it is valid; and because allocating a new buffer just
+	// to save some resident memory is usually a poor trade of spending of time just to reclaim a very minor amount of space.
+	mut size := max_path_buffer_size
+	for {
+		size *= 2
+		mut buf2 := unsafe { &char(malloc_noscan(size)) }
+		res2 := C.readlink(&char(path.str), buf2, size)
+		if res2 < 0 {
+			return last_error()
+		}
+		if res2 < size {
+			unsafe {
+				buf2[res2] = 0
+				return cstring_to_vstring(buf2)
+			}
+		}
+		unsafe { free(buf2) } // and then loop around to try again with a larger one.
+	}
+	return error('${@METHOD} unreachable code')
 }
 
 // link creates a new link (also known as a hard link) to an existing file.
@@ -438,11 +497,13 @@ pub fn (mut f File) close() {
 		return
 	}
 	f.is_opened = false
-	C.fflush(f.cfile)
-	C.fclose(f.cfile)
+	cfile := f.cfile
+	f.cfile = unsafe { nil }
+	C.fflush(cfile)
+	C.fclose(cfile)
 }
 
-fn C.mkstemp(stemplate &u8) int
+fn C.mkstemp(stemplate &u8) i32
 
 // ensure_folder_is_writable checks that `folder` exists, and is writable to the process
 // by creating an empty file in it, then deleting it.
@@ -514,6 +575,7 @@ pub fn posix_set_permission_bit(path_s string, mode u32, enable bool) {
 		true { new_mode |= mode }
 		false { new_mode &= (0o7777 - mode) }
 	}
+
 	C.chmod(&char(path_s.str), int(new_mode))
 }
 
@@ -523,7 +585,7 @@ fn get_long_path(path string) !string {
 	return path
 }
 
-fn C.sysconf(name int) i64
+fn C.sysconf(name i32) i64
 
 // page_size returns the page size in bytes.
 pub fn page_size() int {

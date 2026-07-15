@@ -1,5 +1,5 @@
---- zstd.c	2025-05-30 16:39:46.374765970 +0800
-+++ zstd.c	2025-05-30 21:02:30.710831777 +0800
+--- zstd.c	2026-01-10 14:25:18.651952689 +0100
++++ zstd.c	2026-01-09 17:55:20.698628329 +0100
 @@ -50,6 +50,27 @@
  /* TODO: Can't amalgamate ASM function */
  #define ZSTD_DISABLE_ASM 1
@@ -28,6 +28,15 @@
  /* Include zstd_deps.h first with all the options we need enabled. */
  #define ZSTD_DEPS_NEED_MALLOC
  #define ZSTD_DEPS_NEED_MATH64
+@@ -698,7 +719,7 @@
+ /* vectorization
+  * older GCC (pre gcc-4.3 picked as the cutoff) uses a different syntax,
+  * and some compilers, like Intel ICC and MCST LCC, do not support it at all. */
+-#if !defined(__INTEL_COMPILER) && !defined(__clang__) && defined(__GNUC__) && !defined(__LCC__)
++#if !defined(__INTEL_COMPILER) && !defined(__clang__) && defined(__GNUC__) && !defined(__LCC__) && !defined(__TINYC__)
+ #  if (__GNUC__ == 4 && __GNUC_MINOR__ > 3) || (__GNUC__ >= 5)
+ #    define DONT_VECTORIZE __attribute__((optimize("no-tree-vectorize")))
+ #  else
 @@ -22353,7 +22374,7 @@
  ZSTD_GEN_RECORD_FINGERPRINT(43, 8)
  
@@ -66,6 +75,27 @@
 +/* Use global context for non-reentrant sort functions */
  static COVER_ctx_t *g_coverCtx = NULL;
  #endif
+ 
+@@ -47390,7 +47412,7 @@ static int COVER_cmp8(COVER_ctx_t *ctx, const void *lp, const void *rp) {
+  * Same as COVER_cmp() except ties are broken by pointer value
+  */
+ #if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)
+ static int WIN_CDECL COVER_strict_cmp(void* g_coverCtx, const void* lp, const void* rp) {
+-#elif defined(_GNU_SOURCE)
++#elif defined(_GNU_SOURCE) && !defined(ZSTD_USE_C90_QSORT)
+ static int COVER_strict_cmp(const void *lp, const void *rp, void *g_coverCtx) {
+ #else /* C90 fallback.*/
+ static int COVER_strict_cmp(const void *lp, const void *rp) {
+@@ -47406,7 +47428,7 @@ static int COVER_strict_cmp(const void *lp, const void *rp) {
+  * Faster version for d <= 8.
+  */
+ #if (defined(_WIN32) && defined(_MSC_VER)) || defined(__APPLE__)
+ static int WIN_CDECL COVER_strict_cmp8(void* g_coverCtx, const void* lp, const void* rp) {
+-#elif defined(_GNU_SOURCE)
++#elif defined(_GNU_SOURCE) && !defined(ZSTD_USE_C90_QSORT)
+ static int COVER_strict_cmp8(const void *lp, const void *rp, void *g_coverCtx) {
+ #else /* C90 fallback.*/
+ static int COVER_strict_cmp8(const void *lp, const void *rp) {
  
 @@ -47405,7 +47427,7 @@
      qsort_r(ctx->suffix, ctx->suffixSize, sizeof(U32),

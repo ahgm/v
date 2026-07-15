@@ -6,8 +6,9 @@ fn C.GenerateConsoleCtrlEvent(event u32, pgid u32) bool
 fn C.GetModuleHandleA(name &char) HMODULE
 fn C.GetProcAddress(handle voidptr, procname &u8) voidptr
 fn C.TerminateProcess(process HANDLE, exit_code u32) bool
-fn C.PeekNamedPipe(hNamedPipe voidptr, lpBuffer voidptr, nBufferSize int, lpBytesRead voidptr, lpTotalBytesAvail voidptr,
+fn C.PeekNamedPipe(hNamedPipe voidptr, lpBuffer voidptr, nBufferSize i32, lpBytesRead voidptr, lpTotalBytesAvail voidptr,
 	lpBytesLeftThisMessage voidptr) bool
+fn C.CreateFileW(lpFileName &u16, dwDesiredAccess u32, dwShareMode u32, lpSecurityAttributes voidptr, dwCreationDisposition u32, dwFlagsAndAttributes u32, hTemplateFile voidptr) voidptr
 
 type FN_NTSuspendResume = fn (voidptr) u64
 
@@ -42,9 +43,10 @@ fn close_valid_handle(p voidptr) {
 
 pub struct WProcess {
 pub mut:
-	proc_info    ProcessInformation
-	command_line [65536]u8
-	child_stdin  &u32 = unsafe { nil }
+	proc_info         ProcessInformation
+	command_line      [65536]u8
+	child_stdin_read  &u32 = unsafe { nil }
+	child_stdin_write &u32 = unsafe { nil }
 
 	child_stdout_read  &u32 = unsafe { nil }
 	child_stdout_write &u32 = unsafe { nil }
@@ -62,9 +64,11 @@ fn (mut p Process) win_spawn_process() int {
 		}
 		unsafe { to_be_freed.free() }
 	}
-	p.filename = abs_path(p.filename) // expand the path to an absolute one, in case we later change the working folder
+	p.filename =
+		abs_path(p.filename) // expand the path to an absolute one, in case we later change the working folder
 	mut wdata := &WProcess{
-		child_stdin:        unsafe { nil }
+		child_stdin_read:   unsafe { nil }
+		child_stdin_write:  unsafe { nil }
 		child_stdout_read:  unsafe { nil }
 		child_stdout_write: unsafe { nil }
 		child_stderr_read:  unsafe { nil }
@@ -78,28 +82,57 @@ fn (mut p Process) win_spawn_process() int {
 		lp_title:     unsafe { nil }
 		cb:           sizeof(StartupInfo)
 	}
-	if p.use_stdio_ctl {
-		mut sa := SecurityAttributes{}
+	mut sa := SecurityAttributes{}
+	if p.use_stdio_ctl || p.has_stdin_path {
 		sa.n_length = sizeof(C.SECURITY_ATTRIBUTES)
 		sa.b_inherit_handle = true
-		create_pipe_ok1 := C.CreatePipe(voidptr(&wdata.child_stdout_read), voidptr(&wdata.child_stdout_write),
-			voidptr(&sa), 65536)
+	}
+	if p.has_stdin_path {
+		stdin_path_wide := p.stdin_path.to_wide()
+		to_be_freed << stdin_path_wide
+		stdin_handle := C.CreateFileW(stdin_path_wide, C.GENERIC_READ,
+			C.FILE_SHARE_READ | C.FILE_SHARE_WRITE | C.FILE_SHARE_DELETE, voidptr(&sa),
+			C.OPEN_EXISTING, C.FILE_ATTRIBUTE_NORMAL, 0)
+		if stdin_handle == C.INVALID_HANDLE_VALUE {
+			failed_cfn_report_error(false, 'CreateFileW stdin')
+		}
+		wdata.child_stdin_read = &u32(stdin_handle)
+	}
+	if p.use_stdio_ctl {
+		if !p.has_stdin_path {
+			create_pipe_ok0 := C.CreatePipe(voidptr(&wdata.child_stdin_read),
+				voidptr(&wdata.child_stdin_write), voidptr(&sa), 65536)
+			failed_cfn_report_error(create_pipe_ok0, 'CreatePipe stdin')
+			set_handle_info_ok0 := C.SetHandleInformation(wdata.child_stdin_write,
+				C.HANDLE_FLAG_INHERIT, 0)
+			failed_cfn_report_error(set_handle_info_ok0, 'SetHandleInformation')
+		}
+		create_pipe_ok1 := C.CreatePipe(voidptr(&wdata.child_stdout_read),
+			voidptr(&wdata.child_stdout_write), voidptr(&sa), 65536)
 		failed_cfn_report_error(create_pipe_ok1, 'CreatePipe stdout')
-		set_handle_info_ok1 := C.SetHandleInformation(wdata.child_stdout_read, C.HANDLE_FLAG_INHERIT,
-			0)
+		set_handle_info_ok1 := C.SetHandleInformation(wdata.child_stdout_read,
+			C.HANDLE_FLAG_INHERIT, 0)
 		failed_cfn_report_error(set_handle_info_ok1, 'SetHandleInformation')
-		create_pipe_ok2 := C.CreatePipe(voidptr(&wdata.child_stderr_read), voidptr(&wdata.child_stderr_write),
-			voidptr(&sa), 65536)
+		create_pipe_ok2 := C.CreatePipe(voidptr(&wdata.child_stderr_read),
+			voidptr(&wdata.child_stderr_write), voidptr(&sa), 65536)
 		failed_cfn_report_error(create_pipe_ok2, 'CreatePipe stderr')
-		set_handle_info_ok2 := C.SetHandleInformation(wdata.child_stderr_read, C.HANDLE_FLAG_INHERIT,
-			0)
+		set_handle_info_ok2 := C.SetHandleInformation(wdata.child_stderr_read,
+			C.HANDLE_FLAG_INHERIT, 0)
 		failed_cfn_report_error(set_handle_info_ok2, 'SetHandleInformation stderr')
-		start_info.h_std_input = wdata.child_stdin
+		start_info.h_std_input = wdata.child_stdin_read
 		start_info.h_std_output = wdata.child_stdout_write
 		start_info.h_std_error = wdata.child_stderr_write
 		start_info.dw_flags = u32(C.STARTF_USESTDHANDLES)
+	} else if p.has_stdin_path {
+		start_info.h_std_input = wdata.child_stdin_read
+		start_info.h_std_output = C.GetStdHandle(C.STD_OUTPUT_HANDLE)
+		start_info.h_std_error = C.GetStdHandle(C.STD_ERROR_HANDLE)
+		start_info.dw_flags = u32(C.STARTF_USESTDHANDLES)
 	}
-	cmd := '${p.filename} ' + p.args.join(' ')
+	mut cmd := requote_arg(p.filename)
+	if p.args.len > 0 {
+		cmd += ' ' + requote_args(p.args)
+	}
 	cmd_wide_ptr := cmd.to_wide()
 	to_be_freed << cmd_wide_ptr
 	C.ExpandEnvironmentStringsW(cmd_wide_ptr, voidptr(&wdata.command_line[0]), 32768)
@@ -111,6 +144,17 @@ fn (mut p Process) win_spawn_process() int {
 	}
 	if p.use_pgroup {
 		creation_flags |= C.CREATE_NEW_PROCESS_GROUP
+	}
+
+	mut application_name_ptr := &u16(unsafe { nil })
+	filename_lc := p.filename.to_lower_ascii()
+	if is_abs_path(p.filename) && !filename_lc.ends_with('.bat') && !filename_lc.ends_with('.cmd') {
+		// Bind CreateProcessW to the exact executable path, instead of relying only on
+		// command-line parsing. That avoids accidental prefix matches for spaced paths like
+		// `C:\work\testing v\program.exe`, where Windows may otherwise resolve a stale
+		// `C:\work\testing.exe`.
+		application_name_ptr = p.filename.to_wide()
+		to_be_freed << application_name_ptr
 	}
 
 	mut work_folder_ptr := voidptr(unsafe { nil })
@@ -143,18 +187,24 @@ fn (mut p Process) win_spawn_process() int {
 		}
 		env_block << u16(0)
 		creation_flags |= C.CREATE_UNICODE_ENVIRONMENT
-		defer {
+		defer(fn) {
 			unsafe { env_block.free() }
 		}
 	}
 
-	create_process_ok := C.CreateProcessW(0, voidptr(&wdata.command_line[0]), 0, 0, C.TRUE,
-		creation_flags, if env_block.len > 0 { env_block.data } else { 0 }, work_folder_ptr,
-		voidptr(&start_info), voidptr(&wdata.proc_info))
+	create_process_ok := C.CreateProcessW(application_name_ptr, voidptr(&wdata.command_line[0]), 0,
+		0, C.TRUE, creation_flags, if env_block.len > 0 {
+		env_block.data
+	} else {
+		0
+	}, work_folder_ptr, voidptr(&start_info), voidptr(&wdata.proc_info))
 	failed_cfn_report_error(create_process_ok, 'CreateProcess')
 	if p.use_stdio_ctl {
+		close_valid_handle(&wdata.child_stdin_read)
 		close_valid_handle(&wdata.child_stdout_write)
 		close_valid_handle(&wdata.child_stderr_write)
+	} else if p.has_stdin_path {
+		close_valid_handle(&wdata.child_stdin_read)
 	}
 	p.pid = int(wdata.proc_info.dw_process_id)
 	return p.pid
@@ -200,7 +250,7 @@ fn (mut p Process) win_wait() {
 	if p.wdata != 0 {
 		C.WaitForSingleObject(wdata.proc_info.h_process, C.INFINITE)
 		C.GetExitCodeProcess(wdata.proc_info.h_process, voidptr(&exit_code))
-		close_valid_handle(&wdata.child_stdin)
+		close_valid_handle(&wdata.child_stdin_read)
 		close_valid_handle(&wdata.child_stdout_write)
 		close_valid_handle(&wdata.child_stderr_write)
 		close_valid_handle(&wdata.proc_info.h_process)
@@ -223,7 +273,18 @@ fn (mut p Process) win_is_alive() bool {
 ///////////////
 
 fn (mut p Process) win_write_string(idx int, _s string) {
-	panic_n('Process.write_string is not implemented yet, idx:', idx)
+	mut wdata := unsafe { &WProcess(p.wdata) }
+	if unsafe { wdata == 0 } || idx != 0 {
+		return
+	}
+	mut rhandle := wdata.child_stdin_write
+	if rhandle == 0 {
+		return
+	}
+	mut bytes_write := u32(0)
+	unsafe {
+		C.WriteFile(rhandle, _s.str, u32(_s.len), &bytes_write, 0)
+	}
 }
 
 fn (mut p Process) win_read_string(idx int, _maxbytes int) (string, int) {
@@ -255,7 +316,7 @@ fn (mut p Process) win_read_string(idx int, _maxbytes int) (string, int) {
 	unsafe {
 		C.ReadFile(rhandle, &buf[0], buf.cap, voidptr(&bytes_read), 0)
 	}
-	return buf[..bytes_read].bytestr(), bytes_read
+	return decode_windows_captured_output(buf[..bytes_read].bytestr()), bytes_read
 }
 
 fn (mut p Process) win_is_pending(idx int) bool {
@@ -308,7 +369,7 @@ fn (mut p Process) win_slurp(idx int) string {
 			break
 		}
 	}
-	soutput := read_data.str()
+	soutput := decode_windows_captured_output(read_data.str())
 	unsafe { read_data.free() }
 	//	if idx == 1 {
 	//		close_valid_handle(&wdata.child_stdout_read)
@@ -345,4 +406,55 @@ fn (mut p Process) unix_wait() {
 
 fn (mut p Process) unix_is_alive() bool {
 	return false
+}
+
+@[manualfree]
+fn requote_args(cargs []string) string {
+	mut sb := strings.new_builder(128)
+	defer { unsafe { sb.free() } }
+	for idx, a in cargs {
+		if idx > 0 {
+			sb.write_rune(` `)
+		}
+		sb.write_string(requote_arg(a))
+	}
+	res := sb.str()
+	return res
+}
+
+fn requote_arg(arg string) string {
+	if arg.len == 0 {
+		return '""'
+	}
+	// Escape a literal argv entry using the same backslash+quote rules that
+	// Windows uses when reconstructing argc/argv from CreateProcessW.
+	mut sb := strings.new_builder(arg.len + 8)
+	defer { unsafe { sb.free() } }
+	sb.write_u8(`"`)
+	mut pending_backslashes := 0
+	for i := 0; i < arg.len; i++ {
+		ch := arg[i]
+		if ch == `\\` {
+			pending_backslashes++
+			continue
+		}
+		if ch == `"` {
+			for _ in 0 .. pending_backslashes * 2 + 1 {
+				sb.write_u8(`\\`)
+			}
+			sb.write_u8(`"`)
+			pending_backslashes = 0
+			continue
+		}
+		for _ in 0 .. pending_backslashes {
+			sb.write_u8(`\\`)
+		}
+		pending_backslashes = 0
+		sb.write_u8(ch)
+	}
+	for _ in 0 .. pending_backslashes * 2 {
+		sb.write_u8(`\\`)
+	}
+	sb.write_u8(`"`)
+	return sb.str()
 }

@@ -10,9 +10,14 @@
 ## OF REBUILDING, FOR EASIER/RELIABLE REPRODUCTION OF HISTORIC VERSIONS.
 ## IT IS NOT INTENDED TO BE MODIFIED.
 
-BUILD_CMD=`fc -nl -0`
+if test -z "$BUILD_CMD"; then
+  BUILD_CMD="$(fc -nl -0 2>/dev/null || true)"
+fi
 ## remove whitespaces before/after the actual command:
 BUILD_CMD="$(echo "${BUILD_CMD}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if test -z "$BUILD_CMD"; then
+  BUILD_CMD="$0"
+fi
 
 set -e
 
@@ -40,7 +45,7 @@ rsync -a thirdparty/tcc/ thirdparty/tcc.original/
 
 pushd .
 
-git clone git://repo.or.cz/tinycc.git
+git clone https://repo.or.cz/tinycc.git
 
 cd tinycc
 
@@ -67,7 +72,7 @@ popd
 rsync -a --delete tinycc/$TCC_FOLDER/                 $TCC_FOLDER/
 rsync -a          thirdparty/tcc.original/.git/       $TCC_FOLDER/.git/
 # rsync -a          thirdparty/tcc.original/lib/libgc*  $TCC_FOLDER/lib/
-rsync -a          thirdparty/tcc.original/lib/build*  $TCC_FOLDER/lib/
+# rsync -a          thirdparty/tcc.original/lib/build*  $TCC_FOLDER/lib/
 rsync -a          thirdparty/tcc.original/README.md   $TCC_FOLDER/README.md
 rsync -a          $CURRENT_SCRIPT_PATH                $TCC_FOLDER/build.sh
 mv                $TCC_FOLDER/tcc                     $TCC_FOLDER/tcc.exe

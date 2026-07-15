@@ -13,7 +13,8 @@ pub fn aprox_sin(a f64) f64 {
 	a5 := 2.08026600266304389e-2
 	a6 := -3.03996055049204407e-3
 	a7 := 1.38235642404333740e-4
-	return a0 + a * (a1 + a * (a2 + a * (a3 + a * (a4 + a * (a5 + a * (a6 + a * a7))))))
+	tmp := a4 + a * (a5 + a * (a6 + a * a7))
+	return a0 + a * (a1 + a * (a2 + a * (a3 + a * tmp)))
 }
 
 // aprox_cos returns an approximation of cos(a) made using lolremez
@@ -27,7 +28,8 @@ pub fn aprox_cos(a f64) f64 {
 	a6 := -3.8510875386947414e-3
 	a7 := 4.7196604604366623e-4
 	a8 := -1.8776444013090451e-5
-	return a0 + a * (a1 + a * (a2 + a * (a3 + a * (a4 + a * (a5 + a * (a6 + a * (a7 + a * a8)))))))
+	tmp := a4 + a * (a5 + a * (a6 + a * (a7 + a * a8)))
+	return a0 + a * (a1 + a * (a2 + a * (a3 + a * tmp)))
 }
 
 // copysign returns a value with the magnitude of x and the sign of y
@@ -79,9 +81,9 @@ pub fn digits(num i64, params DigitParams) []int {
 		panic_n('digits: Cannot find digits of n with base:', b)
 	}
 	mut n := num
-	mut sign := 1
+	mut sgn := 1
 	if n < 0 {
-		sign = -1
+		sgn = -1
 		n = -n
 	}
 
@@ -97,8 +99,8 @@ pub fn digits(num i64, params DigitParams) []int {
 		n = next_n
 	}
 
-	if sign == -1 {
-		res[res.len - 1] *= sign
+	if sgn == -1 {
+		res[res.len - 1] *= sgn
 	}
 
 	if params.reverse {

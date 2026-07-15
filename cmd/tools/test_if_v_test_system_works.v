@@ -4,6 +4,7 @@ module main
 // and that it exits with code 1, when at least 1 FAIL happen.
 import os
 import rand
+import time
 
 const vexe = os.quoted_path(get_vexe_path())
 const vroot = os.dir(vexe)
@@ -67,7 +68,8 @@ fn create_test(tname string, tcontent string) !string {
 
 fn check_assert_continues_works() ! {
 	os.chdir(tdir)!
-	create_test('assert_continues_option_works_test.v', 'fn test_fail1() { assert 2==4\nassert 2==1\nassert 2==0 }\nfn test_ok(){ assert true }\nfn test_fail2() { assert false }')!
+	create_test('assert_continues_option_works_test.v',
+		'fn test_fail1() { assert 2==4\nassert 2==1\nassert 2==0 }\nfn test_ok(){ assert true }\nfn test_fail2() { assert false }')!
 	result := check_fail('${vexe} -assert continues assert_continues_option_works_test.v')
 	result.has('assert_continues_option_works_test.v:1: fn test_fail1')
 	result.has('assert_continues_option_works_test.v:2: fn test_fail1')
@@ -75,7 +77,8 @@ fn check_assert_continues_works() ! {
 	result.has('assert_continues_option_works_test.v:5: fn test_fail2')
 	result.has('> assert 2 == 4').has('> assert 2 == 1').has('> assert 2 == 0')
 	// Check if a test function, tagged with [assert_continues], has the same behaviour, without needing additional options
-	create_test('assert_continues_tag_works_test.v', '@[assert_continues]fn test_fail1() { assert 2==4\nassert 2==1\nassert 2==0 }\nfn test_ok(){ assert true }\nfn test_fail2() { assert false\n assert false }')!
+	create_test('assert_continues_tag_works_test.v',
+		'@[assert_continues]fn test_fail1() { assert 2==4\nassert 2==1\nassert 2==0 }\nfn test_ok(){ assert true }\nfn test_fail2() { assert false\n assert false }')!
 	tag_res := check_fail('${vexe} assert_continues_tag_works_test.v')
 	tag_res.has('assert_continues_tag_works_test.v:1: fn test_fail1')
 	tag_res.has('assert_continues_tag_works_test.v:2: fn test_fail1')
@@ -110,7 +113,14 @@ fn main() {
 	defer {
 		os.chdir(os.wd_at_startup) or {}
 	}
+	unbuffer_stdout()
+	spawn fn () {
+		time.sleep(120 * time.second)
+		eprintln('>>> exiting due to an expired watchdog timer <<<')
+		exit(1)
+	}()
 	println('> vroot: ${vroot} | vexe: ${vexe} | tdir: ${tdir}')
+	os.setenv('VTEST_HIDE_OK', '0', true)
 	ok_fpath := create_test('a_single_ok_test.v', 'fn test_ok(){ assert true }')!
 	if check_ok('${vexe} ${ok_fpath}') != '' {
 		exit(1)

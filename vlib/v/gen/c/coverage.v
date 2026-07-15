@@ -53,7 +53,8 @@ fn (mut g Gen) write_coverage_stats() {
 	if !os.exists(coverage_meta_folder) {
 		os.mkdir_all(coverage_meta_folder) or {}
 	}
-	counter_ulid := rand.ulid() // rand.ulid provides a hash+timestamp, so that a collision is extremely unlikely
+	counter_ulid :=
+		rand.ulid() // rand.ulid provides a hash+timestamp, so that a collision is extremely unlikely
 	g.cov_declarations.writeln('')
 	g.cov_declarations.writeln('void vprint_coverage_stats() {')
 	g.cov_declarations.writeln('\tchar cov_filename[2048];')
@@ -86,10 +87,10 @@ fn (mut g Gen) write_coverage_stats() {
 		fmeta.writeln('}') or { continue }
 		fmeta.close()
 	}
-	g.cov_declarations.writeln('\tlong int secs = 0;')
-	g.cov_declarations.writeln('\tlong int nsecs = 0;')
+	g.cov_declarations.writeln('\tint secs = 0;')
+	g.cov_declarations.writeln('\tint nsecs = 0;')
 	g.cov_declarations.writeln('\t#if defined(_WIN32)')
-	g.cov_declarations.writeln('\tlong int ticks_passed = GetTickCount();')
+	g.cov_declarations.writeln('\tint ticks_passed = GetTickCount();')
 	g.cov_declarations.writeln('\nsecs = ticks_passed / 1000;')
 	g.cov_declarations.writeln('\nnsecs = (ticks_passed % 1000) * 1000000;')
 	g.cov_declarations.writeln('\t#endif')
@@ -97,10 +98,11 @@ fn (mut g Gen) write_coverage_stats() {
 	g.cov_declarations.writeln('\tstruct timespec ts;')
 	g.cov_declarations.writeln('\tclock_gettime(CLOCK_MONOTONIC, &ts);')
 	g.cov_declarations.writeln('\tsecs = ts.tv_sec;')
-	g.cov_declarations.writeln('\nsecs = ts.tv_nsec;')
+	g.cov_declarations.writeln('\tnsecs = ts.tv_nsec;')
 	g.cov_declarations.writeln('\t#endif')
 	g.cov_declarations.writeln('\tsnprintf(cov_filename, sizeof(cov_filename), "%s/vcounters_${counter_ulid}.%07ld.%09ld.csv", cov_dir, secs, nsecs);')
 	g.cov_declarations.writeln('\tFILE *fp = fopen(cov_filename, "wb+");')
+	g.cov_declarations.writeln('\tif (fp == NULL) { return; }')
 	cprefpath := cesc(os.real_path(g.pref.path))
 	cboptions := cesc(build_options)
 	g.cov_declarations.writeln('\tfprintf(fp, "# path: ${cprefpath}\\n");')
@@ -109,7 +111,7 @@ fn (mut g Gen) write_coverage_stats() {
 	for k, cov in g.coverage_files {
 		nr_points := cov.points.len
 		g.cov_declarations.writeln('\t{')
-		g.cov_declarations.writeln('\t\tfor (int i = 0; i < ${nr_points}; ++i) {')
+		g.cov_declarations.writeln('\t\tfor (${ast.int_type_name} i = 0; i < ${nr_points}; ++i) {')
 		g.cov_declarations.writeln('\t\t\tif (_v_cov[_v_cov_file_offset_${k}+i]) {')
 		g.cov_declarations.writeln("\t\t\t\tfprintf(fp, \"%s,%d,%ld\\n\", \"${cov.fhash}\", i, _v_cov[_v_cov_file_offset_${k}+i]);")
 		g.cov_declarations.writeln('\t\t\t}')

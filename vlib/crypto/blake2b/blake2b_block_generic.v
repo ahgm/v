@@ -11,8 +11,8 @@ module blake2b
 import math.bits
 
 // mixing function g
-@[inline]
-fn g(mut v []u64, a u8, b u8, c u8, d u8, x u64, y u64) {
+@[direct_array_access; inline]
+fn g(mut v [16]u64, a u8, b u8, c u8, d u8, x u64, y u64) {
 	v[a] = v[a] + v[b] + x
 	v[d] = bits.rotate_left_64((v[d] ^ v[a]), nr1)
 	v[c] = v[c] + v[d]
@@ -24,8 +24,8 @@ fn g(mut v []u64, a u8, b u8, c u8, d u8, x u64, y u64) {
 }
 
 // one complete mixing round with the function g
-@[inline]
-fn (d Digest) mixing_round(mut v []u64, s []u8) {
+@[direct_array_access; inline]
+fn (d Digest) mixing_round(mut v [16]u64, s [16]u8) {
 	g(mut v, 0, 4, 8, 12, d.m[s[0]], d.m[s[1]])
 	g(mut v, 1, 5, 9, 13, d.m[s[2]], d.m[s[3]])
 	g(mut v, 2, 6, 10, 14, d.m[s[4]], d.m[s[5]])
@@ -38,11 +38,14 @@ fn (d Digest) mixing_round(mut v []u64, s []u8) {
 }
 
 // compression function f
+@[direct_array_access]
 fn (mut d Digest) f(f bool) {
 	// initialize the working vector
-	mut v := []u64{len: 0, cap: 16}
-	v << d.h[..8]
-	v << iv[..8]
+	mut v := [16]u64{}
+	for i in 0 .. 8 {
+		v[i] = d.h[i]
+		v[i + 8] = iv[i]
+	}
 
 	v[12] ^= d.t.lo
 	v[13] ^= d.t.hi

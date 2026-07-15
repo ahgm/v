@@ -25,18 +25,34 @@ mut:
 
 pub const default_server_port = 9009
 
+pub const default_https_server_port = 9043
+
 pub struct Server {
 mut:
-	state ServerStatus = .closed
+	state           ServerStatus = .closed
+	listener_opened bool
 pub mut:
-	addr               string        = ':${default_server_port}'
-	handler            Handler       = DebugHandler{}
-	read_timeout       time.Duration = 30 * time.second
-	write_timeout      time.Duration = 30 * time.second
-	accept_timeout     time.Duration = 30 * time.second
-	pool_channel_slots int           = 1024
-	worker_num         int           = runtime.nr_jobs()
-	listener           net.TcpListener
+	addr                    string        = ':${default_server_port}'
+	handler                 Handler       = DebugHandler{}
+	read_timeout            time.Duration = 30 * time.second
+	write_timeout           time.Duration = 30 * time.second
+	accept_timeout          time.Duration = 30 * time.second
+	tls_handshake_timeout   time.Duration = 30 * time.second // fallback handshake budget used when accept_timeout is zero or net.infinite_timeout; ignored on non-TLS servers
+	pool_channel_slots      int           = 1024
+	worker_num              int           = runtime.nr_jobs()
+	max_keep_alive_requests int           = 100 // max requests per keep-alive connection (0 = unlimited)
+	listener                net.TcpListener
+
+	// TLS termination: when both `cert` and `cert_key` are set, the server
+	// accepts HTTPS connections instead of plain HTTP. With
+	// `in_memory_verification = true`, `cert` and `cert_key` are PEM strings;
+	// otherwise they are filesystem paths. Currently implemented on the
+	// default mbedtls backend; building with `-d use_openssl` reports a clear
+	// runtime error from listen_and_serve.
+	cert                   string
+	cert_key               string
+	in_memory_verification bool
+	enable_http2           bool // opt in to HTTP/2 on the TLS listener: advertises ALPN `h2, http/1.1`. Clients that select `h2` are served by the HTTP/2 driver; clients that select `http/1.1` (or send no ALPN) keep the existing HTTP/1.1 path.
 
 	on_running fn (mut s Server) = unsafe { nil } // Blocking cb. If set, ran by the web server on transitions to its .running state.
 	on_stopped fn (mut s Server) = unsafe { nil } // Blocking cb. If set, ran by the web server on transitions to its .stopped state.
@@ -50,6 +66,11 @@ pub mut:
 pub fn (mut s Server) listen_and_serve() {
 	if s.handler is DebugHandler {
 		eprintln('Server handler not set, using debug handler')
+	}
+
+	if s.cert != '' && s.cert_key != '' {
+		s.listen_and_serve_tls()
+		return
 	}
 
 	mut l := s.listener.addr() or {
@@ -70,6 +91,7 @@ pub fn (mut s Server) listen_and_serve() {
 		}
 	}
 	s.addr = l.str()
+	s.listener_opened = true
 	s.listener.set_accept_timeout(s.accept_timeout)
 
 	// Create tcp connection channel
@@ -77,7 +99,7 @@ pub fn (mut s Server) listen_and_serve() {
 	// Create workers
 	mut ws := []thread{cap: s.worker_num}
 	for wid in 0 .. s.worker_num {
-		ws << new_handler_worker(wid, ch, s.handler)
+		ws << new_handler_worker(wid, ch, s.handler, s.max_keep_alive_requests)
 	}
 
 	if s.show_startup_message {
@@ -91,7 +113,7 @@ pub fn (mut s Server) listen_and_serve() {
 		s.on_running(mut s)
 	}
 	for s.state == .running {
-		mut conn := s.listener.accept() or {
+		mut conn := s.listener.accept_only() or {
 			if err.code() == net.err_timed_out_code {
 				// Skip network timeouts, they are normal
 				continue
@@ -121,7 +143,10 @@ pub fn (mut s Server) stop() {
 @[inline]
 pub fn (mut s Server) close() {
 	s.state = .closed
-	s.listener.close() or { return }
+	if s.listener_opened {
+		s.listener.close() or { return }
+		s.listener_opened = false
+	}
 	if s.on_closed != unsafe { nil } {
 		s.on_closed(mut s)
 	}
@@ -159,17 +184,19 @@ pub fn (mut s Server) wait_till_running(params WaitTillRunningParams) !int {
 }
 
 struct HandlerWorker {
-	id int
-	ch chan &net.TcpConn
+	id                      int
+	ch                      chan &net.TcpConn
+	max_keep_alive_requests int
 pub mut:
 	handler Handler
 }
 
-fn new_handler_worker(wid int, ch chan &net.TcpConn, handler Handler) thread {
+fn new_handler_worker(wid int, ch chan &net.TcpConn, handler Handler, max_keep_alive_requests int) thread {
 	mut w := &HandlerWorker{
-		id:      wid
-		ch:      ch
-		handler: handler
+		id:                      wid
+		ch:                      ch
+		handler:                 handler
+		max_keep_alive_requests: max_keep_alive_requests
 	}
 	return spawn w.process_requests()
 }
@@ -182,6 +209,11 @@ fn (mut w HandlerWorker) process_requests() {
 }
 
 fn (mut w HandlerWorker) handle_conn(mut conn net.TcpConn) {
+	conn.set_sock() or {
+		net.close(conn.handle) or {}
+		eprintln('set_sock() failed: ${err}')
+		return
+	}
 	defer {
 		conn.close() or { eprintln('close() failed: ${err}') }
 	}
@@ -192,28 +224,93 @@ fn (mut w HandlerWorker) handle_conn(mut conn net.TcpConn) {
 			reader.free()
 		}
 	}
-	mut req := parse_request(mut reader) or {
-		$if debug {
-			// only show in debug mode to prevent abuse
-			eprintln('error parsing request: ${err}')
+
+	mut request_count := 0
+	for {
+		mut req := parse_request(mut reader) or {
+			if err !is io.Eof {
+				$if debug {
+					// only show in debug mode to prevent abuse
+					eprintln('error parsing request: ${err}')
+				}
+			}
+			return
 		}
-		return
+		request_count++
+
+		remote_ip := conn.peer_ip() or { '0.0.0.0' }
+		req.header.add_custom('Remote-Addr', remote_ip) or {}
+
+		mut resp := w.handler.handle(req)
+		normalize_server_response(mut resp, req)
+
+		// Implemented by developers?
+		if !resp.header.contains(.content_length) {
+			resp.header.set(.content_length, '${resp.body.len}')
+		}
+
+		// Check if max keep-alive requests limit reached
+		max_reached := w.max_keep_alive_requests > 0 && request_count >= w.max_keep_alive_requests
+
+		// Determine if connection should be kept alive
+		// HTTP/1.1 defaults to keep-alive, HTTP/1.0 defaults to close
+		req_conn := (req.header.get(.connection) or { '' }).to_lower()
+		resp_conn := (resp.header.get(.connection) or { '' }).to_lower()
+		keep_alive := if max_reached {
+			false
+		} else if resp_conn == 'close' {
+			false
+		} else if resp_conn == 'keep-alive' {
+			true
+		} else if req_conn == 'close' {
+			false
+		} else if req_conn == 'keep-alive' {
+			true
+		} else {
+			// Default behavior based on HTTP version
+			req.version == .v1_1
+		}
+
+		// Set Connection header in response
+		// Always override if max requests reached, otherwise only set if not already present
+		if max_reached || !resp.header.contains(.connection) {
+			if keep_alive {
+				resp.header.set(.connection, 'keep-alive')
+			} else {
+				resp.header.set(.connection, 'close')
+			}
+		}
+
+		conn.write(resp.bytes()) or {
+			eprintln('error sending response: ${err}')
+			return
+		}
+
+		if !keep_alive {
+			return
+		}
+	}
+}
+
+fn normalize_server_response(mut resp Response, req Request) {
+	server_version := if req.version == .unknown { Version.v1_1 } else { req.version }
+	match resp.http_version {
+		'1.0', '1.1', '2.0' {}
+		else {
+			resp.set_version(server_version)
+		}
 	}
 
-	remote_ip := conn.peer_ip() or { '0.0.0.0' }
-	req.header.add_custom('Remote-Addr', remote_ip) or {}
-
-	mut resp := w.handler.handle(req)
-	if resp.version() == .unknown {
-		resp.set_version(req.version)
+	status := status_from_int(resp.status_code)
+	if status.is_valid() {
+		if resp.status_msg == '' {
+			resp.status_msg = status.str()
+		}
+	} else if resp.status_code == 0 && resp.status_msg == '' {
+		resp.set_status(.ok)
+	} else {
+		resp.set_status(.internal_server_error)
 	}
-
-	// Implemented by developers?
-	if !resp.header.contains(.content_length) {
-		resp.header.set(.content_length, '${resp.body.len}')
-	}
-
-	conn.write(resp.bytes()) or { eprintln('error sending response: ${err}') }
 }
 
 // DebugHandler implements the Handler interface by echoing the request

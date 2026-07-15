@@ -30,7 +30,7 @@ For a list of all features and fixes, check out the changelog.
 - [x] Handle function pointers safely, remove `if function == 0 {`
 - [x] Bundle an SSL library (mbedtls) like GC
 - [x] Anonymous structs
-- [x] Improve vweb: allow separation of logic via "controllers", lots of other fixes
+- [x] Improve veb: allow separation of logic via "controllers", lots of other fixes
 - [x] New VPM site
 
 ## [Version 0.5]
@@ -38,12 +38,13 @@ For a list of all features and fixes, check out the changelog.
 - [x] Parallel C compilation via `-parallel-cc`
 - [x] Parallel parser (not integrated yet)
 - [x] Parallel checker (not integrated yet)
-- [x] Improved vweb => veb framework. Separation of global and context (request local) fields.
+- [x] Improved veb framework. Separation of global and context (request local) fields.
       Performance and stability. Based on picoev.
 - [x] -skip-unused on by default
 - [x] Lambdas: `a.sort(|a, b| a > b)`
 - [x] Implicit Veb contexts passed to requests
 - [x] Direct C/C++ interop without generating wrappers (via -experimental for now)
+- [x] Allow `$if` everywhere: top level, inside struct definitions, etc
 
 ## [Version 0.6]
 
@@ -58,7 +59,6 @@ For a list of all features and fixes, check out the changelog.
 - [ ] `recover()` from panics
 - [ ] -usecache on by default
 - [ ] ORM migrations
-- [ ] Allow `$if` everywhere: top level, inside struct definitions, etc
 - [ ] Make ORM work without installing developer libs (libpq-dev etc)
 
 ## [Version 1.0]

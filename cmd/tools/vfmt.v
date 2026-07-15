@@ -27,6 +27,7 @@ struct FormatOptions {
 	is_worker  bool // true *only* in the worker processes. Note: workers can crash.
 	is_backup  bool // make a `file.v.bak` copy *before* overwriting a `file.v` in place with `-w`
 	in_process bool // do not fork a worker process; potentially faster, but more prone to crashes for invalid files
+	is_new_int bool // Forcefully cast the `int` type in @[translated] modules or in the definition of `C.func` to the `i32` type.
 mut:
 	diff_cmd string // filled in when -diff or -verify is passed
 }
@@ -34,6 +35,8 @@ mut:
 const formatted_file_token = '\@\@\@' + 'FORMATTED_FILE: '
 const vtmp_folder = os.vtmp_dir()
 const term_colors = term.can_show_color_on_stderr()
+const vfmt_only_flags = ['-backup', '-c', '-diff', '-inprocess', '-l', '-new_int', '-noerror',
+	'-verbose', '--verbose', '-verify', '-w']
 
 fn main() {
 	// if os.getenv('VFMT_ENABLE') == '' {
@@ -55,6 +58,7 @@ fn main() {
 		is_verify:  '-verify' in args
 		is_backup:  '-backup' in args
 		in_process: '-inprocess' in args
+		is_new_int: '-new_int' in args
 	}
 	if term_colors {
 		os.setenv('VCOLORS', 'always', true)
@@ -77,6 +81,9 @@ fn main() {
 		eprintln('vfmt env_vflags_and_os_args: ' + args.str())
 		eprintln('vfmt possible_files: ' + possible_files.str())
 	}
+	if '-help' in args || '--help' in args {
+		help.print_and_exit('fmt')
+	}
 	files := util.find_all_v_files(possible_files) or {
 		verror(err.msg())
 		return
@@ -85,7 +92,7 @@ fn main() {
 		foptions.format_pipe()
 		exit(0)
 	}
-	if files.len == 0 || '-help' in args || '--help' in args {
+	if files.len == 0 {
 		help.print_and_exit('fmt')
 	}
 	mut cli_args_no_files := []string{}
@@ -100,7 +107,7 @@ fn main() {
 	}
 	mut errors := 0
 	mut has_internal_error := false
-	mut prefs := setup_preferences()
+	mut prefs := setup_preferences(args)
 	for file in files {
 		fpath := os.real_path(file)
 		if foptions.is_verify && foptions.in_process {
@@ -143,36 +150,57 @@ fn main() {
 		}
 		errors++
 	}
-	ecode := if has_internal_error { 5 } else { 0 }
+	if has_internal_error {
+		// When some files could not be processed due to internal vfmt errors,
+		// exit with code 5 regardless of format-diff errors in other files.
+		// This prevents exit codes like 7 (2+5) that confuse downstream CI checks.
+		exit(5)
+	}
 	if errors > 0 {
 		if !foptions.is_diff {
 			eprintln('Encountered a total of: ${errors} formatting errors.')
 		}
 		match true {
-			foptions.is_noerror { exit(0 + ecode) }
-			foptions.is_verify { exit(1 + ecode) }
-			foptions.is_c { exit(2 + ecode) }
-			else { exit(1 + ecode) }
+			foptions.is_noerror { exit(0) }
+			foptions.is_verify { exit(1) }
+			foptions.is_c { exit(2) }
+			else { exit(1) }
 		}
 	}
-	exit(ecode)
+	exit(0)
 }
 
 fn (foptions &FormatOptions) verify_file(prefs &pref.Preferences, fpath string) bool {
-	fcontent := foptions.formated_content_from_file(prefs, fpath)
+	fcontent := foptions.formated_content_from_file(prefs, fpath) or { return false }
 	content := os.read_file(fpath) or { return false }
 	return fcontent == content
 }
 
-fn setup_preferences() &pref.Preferences {
-	mut prefs := pref.new_preferences()
+fn setup_preferences(args []string) &pref.Preferences {
+	mut prefs, _ := pref.parse_args_and_show_errors(['fmt'], vfmt_args_for_preferences(args), false)
 	prefs.is_fmt = true
 	prefs.skip_warnings = true
 	return prefs
 }
 
-fn setup_preferences_and_table() (&pref.Preferences, &ast.Table) {
-	return setup_preferences(), ast.new_table()
+fn vfmt_args_for_preferences(args []string) []string {
+	mut res := []string{}
+	for i := 1; i < args.len; i++ {
+		arg := args[i]
+		if arg == '-worker' {
+			i++
+			continue
+		}
+		if arg in vfmt_only_flags {
+			continue
+		}
+		res << arg
+	}
+	return res
+}
+
+fn setup_preferences_and_table(args []string) (&pref.Preferences, &ast.Table) {
+	return setup_preferences(args), ast.new_table()
 }
 
 fn (foptions &FormatOptions) vlog(msg string) {
@@ -181,9 +209,13 @@ fn (foptions &FormatOptions) vlog(msg string) {
 	}
 }
 
-fn (foptions &FormatOptions) formated_content_from_file(prefs &pref.Preferences, file string) string {
+fn (foptions &FormatOptions) formated_content_from_file(prefs &pref.Preferences, file string) !string {
 	mut table := ast.new_table()
 	file_ast := parser.parse_file(file, mut table, .parse_comments, prefs)
+	if file_ast.errors.len > 0 {
+		return error('the file contains parser errors')
+	}
+	table.new_int = foptions.is_new_int
 	formated_content := fmt.fmt(file_ast, mut table, prefs, foptions.is_debug)
 	return formated_content
 }
@@ -199,9 +231,14 @@ fn (foptions &FormatOptions) format_file(file string) {
 		return
 	}
 	foptions.vlog('vfmt2 running fmt.fmt over file: ${file}')
-	prefs, mut table := setup_preferences_and_table()
+	args := util.join_env_vflags_and_os_args()
+	prefs, mut table := setup_preferences_and_table(args)
 	file_ast := parser.parse_file(file, mut table, .parse_comments, prefs)
+	if file_ast.errors.len > 0 {
+		exit(2)
+	}
 	// checker.new_checker(table, prefs).check(file_ast)
+	table.new_int = foptions.is_new_int
 	formatted_content := fmt.fmt(file_ast, mut table, prefs, foptions.is_debug)
 	os.write_file(vfmt_output_path, formatted_content) or { panic(err) }
 	foptions.vlog('fmt.fmt worked and ${formatted_content.len} bytes were written to ${vfmt_output_path} .')
@@ -210,29 +247,21 @@ fn (foptions &FormatOptions) format_file(file string) {
 
 fn (foptions &FormatOptions) format_pipe() {
 	foptions.vlog('vfmt2 running fmt.fmt over stdin')
-	prefs, mut table := setup_preferences_and_table()
+	args := util.join_env_vflags_and_os_args()
+	prefs, mut table := setup_preferences_and_table(args)
 	input_text := os.get_raw_lines_joined()
 	file_ast := parser.parse_text(input_text, '', mut table, .parse_comments, prefs)
+	if file_ast.errors.len > 0 {
+		exit(1)
+	}
 	// checker.new_checker(table, prefs).check(file_ast)
+	table.new_int = foptions.is_new_int
 	formatted_content := fmt.fmt(file_ast, mut table, prefs, foptions.is_debug,
 		source_text: input_text
 	)
 	print(formatted_content)
 	flush_stdout()
 	foptions.vlog('fmt.fmt worked and ${formatted_content.len} bytes were written to stdout.')
-}
-
-fn print_compiler_options(compiler_params &pref.Preferences) {
-	eprintln('         os: ' + compiler_params.os.str())
-	eprintln('  ccompiler: ${compiler_params.ccompiler}')
-	eprintln('       path: ${compiler_params.path} ')
-	eprintln('   out_name: ${compiler_params.out_name} ')
-	eprintln('      vroot: ${compiler_params.vroot} ')
-	eprintln('lookup_path: ${compiler_params.lookup_path} ')
-	eprintln('   out_name: ${compiler_params.out_name} ')
-	eprintln('     cflags: ${compiler_params.cflags} ')
-	eprintln('    is_test: ${compiler_params.is_test} ')
-	eprintln('  is_script: ${compiler_params.is_script} ')
 }
 
 fn (mut foptions FormatOptions) post_process_file(file string, formatted_file_path string) ! {
@@ -298,11 +327,6 @@ fn (mut foptions FormatOptions) post_process_file(file string, formatted_file_pa
 	}
 	print(formatted_fc)
 	flush_stdout()
-}
-
-fn read_source_lines(file string) ![]string {
-	source_lines := os.read_lines(file) or { return error('can not read ${file}') }
-	return source_lines
 }
 
 @[noreturn]

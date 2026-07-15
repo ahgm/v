@@ -1,3 +1,5 @@
+// vtest vflags: -prod
+// vtest build: !windows // fasthttp.Server.run is not implemented on windows yet
 import veb
 import net.http
 import os
@@ -19,8 +21,14 @@ pub fn (mut app App) before_accept_loop() {
 	app.started <- true
 }
 
+@['/']
 pub fn (mut app App) index(mut ctx Context) veb.Result {
 	return ctx.text('Hello V!')
+}
+
+@['/redirect_root']
+pub fn (mut app App) redirect_root(mut ctx Context) veb.Result {
+	return ctx.redirect('/root.txt')
 }
 
 @[post]
@@ -61,6 +69,9 @@ fn run_app_test() {
 
 	app.handle_static('testdata', true) or { panic(err) }
 
+	// Enable markdown content negotiation for testing
+	app.enable_markdown_negotiation = true
+
 	if _ := app.mount_static_folder_at('testdata', 'static') {
 		assert true == false, 'should throw invalid mount path error'
 	} else {
@@ -82,6 +93,20 @@ fn run_app_test() {
 
 fn test_static_root() {
 	x := http.get('${localserver}/root.txt')!
+
+	assert x.status() == .ok
+	assert x.body == 'root'
+}
+
+fn test_route_attribute_root_with_static_handler() {
+	x := http.get('${localserver}/')!
+
+	assert x.status() == .ok
+	assert x.body == 'Hello V!'
+}
+
+fn test_redirect_to_static_root() {
+	x := http.get('${localserver}/redirect_root')!
 
 	assert x.status() == .ok
 	assert x.body == 'root'
@@ -109,7 +134,7 @@ fn test_custom_mime_types() {
 	x := http.get('${localserver}/unknown_mime.what')!
 
 	assert x.status() == .ok
-	assert x.header.get(.content_type)! == veb.mime_types['.txt']
+	assert x.header.get(.content_type)? == veb.mime_types['.txt']
 	assert x.body.trim_space() == 'unknown_mime'
 }
 
@@ -125,4 +150,87 @@ fn test_upper_case_mime_type() {
 
 	assert x.status() == .ok
 	assert x.body == 'body'
+}
+
+// Content negotiation tests - Priority order
+// Tests verify: path.md > path.html.md > path/index.html.md
+
+fn test_markdown_negotiation_priority_first() {
+	// When all three variants exist, path.md (priority 1) is served
+	config := http.FetchConfig{
+		url:    '${localserver}/about'
+		header: http.new_header(key: .accept, value: 'text/markdown')
+	}
+	x := http.fetch(config)!
+
+	assert x.status() == .ok
+	assert x.header.get(.content_type)? == 'text/markdown'
+	assert x.body.contains('This is the about page in markdown format.')
+	assert !x.body.contains('about.html.md variant')
+	assert !x.body.contains('about/index.html.md variant')
+}
+
+fn test_markdown_negotiation_priority_second() {
+	// When only path.html.md exists (priority 2), it is served
+	config := http.FetchConfig{
+		url:    '${localserver}/page'
+		header: http.new_header(key: .accept, value: 'text/markdown')
+	}
+	x := http.fetch(config)!
+
+	assert x.status() == .ok
+	assert x.header.get(.content_type)? == 'text/markdown'
+	assert x.body.contains('# Page HTML Markdown')
+}
+
+fn test_markdown_negotiation_directory_index() {
+	// For directories, index.html.md is served when Accept: text/markdown
+	config := http.FetchConfig{
+		url:    '${localserver}/sub_folder/'
+		header: http.new_header(key: .accept, value: 'text/markdown')
+	}
+	x := http.fetch(config)!
+
+	assert x.status() == .ok
+	assert x.header.get(.content_type)? == 'text/markdown'
+	assert x.body.contains('# Index HTML Markdown')
+}
+
+// Direct access tests - Verifies backward compatibility
+
+fn test_markdown_direct_access() {
+	// Without Accept header
+	x_no_header := http.get('${localserver}/test.md')!
+	assert x_no_header.status() == .ok
+	assert x_no_header.header.get(.content_type)? == 'text/markdown'
+	assert x_no_header.body.contains('# Test Markdown')
+
+	// With Accept: text/markdown header - same result
+	config := http.FetchConfig{
+		url:    '${localserver}/test.md'
+		header: http.new_header(key: .accept, value: 'text/markdown')
+	}
+	x_with_header := http.fetch(config)!
+	assert x_with_header.status() == .ok
+	assert x_with_header.header.get(.content_type)? == 'text/markdown'
+	assert x_with_header.body.contains('# Test Markdown')
+}
+
+fn test_markdown_variants_direct_access() {
+	// All markdown variants remain accessible via their full paths
+	x_html_md := http.get('${localserver}/about.html.md')!
+	assert x_html_md.status() == .ok
+	assert x_html_md.body.contains('about.html.md variant')
+
+	x_index := http.get('${localserver}/about/index.html.md')!
+	assert x_index.status() == .ok
+	assert x_index.body.contains('about/index.html.md variant')
+}
+
+// Negative tests - Verifies correct behavior without Accept header
+
+fn test_markdown_no_negotiation_without_header() {
+	// Without Accept: text/markdown, content is not found for directories with no index.html
+	x := http.get('${localserver}/about')!
+	assert x.status() == .not_found
 }

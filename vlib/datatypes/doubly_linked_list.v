@@ -21,7 +21,8 @@ mut:
 	// of the list while iterating. TODO: use an option
 	// instead of a pointer to determine it is initialized.
 	iter &DoublyListIter[T] = unsafe { 0 }
-	len  int
+pub mut:
+	len int
 }
 
 // is_empty checks if the linked list is empty
@@ -52,34 +53,34 @@ pub fn (list DoublyLinkedList[T]) last() !T {
 
 // push_back adds an element to the end of the linked list
 pub fn (mut list DoublyLinkedList[T]) push_back(item T) {
-	mut new_node := &DoublyListNode[T]{
+	mut created := &DoublyListNode[T]{
 		data: item
 	}
 	if list.is_empty() {
 		// first node case
-		list.head = new_node
-		list.tail = new_node
+		list.head = created
+		list.tail = created
 	} else {
-		list.tail.next = new_node
-		new_node.prev = list.tail
-		list.tail = new_node
+		list.tail.next = created
+		created.prev = list.tail
+		list.tail = created
 	}
 	list.len += 1
 }
 
 // push_front adds an element to the beginning of the linked list
 pub fn (mut list DoublyLinkedList[T]) push_front(item T) {
-	mut new_node := &DoublyListNode[T]{
+	mut created := &DoublyListNode[T]{
 		data: item
 	}
 	if list.is_empty() {
 		// first node case
-		list.head = new_node
-		list.tail = new_node
+		list.head = created
+		list.tail = created
 	} else {
-		list.head.prev = new_node
-		new_node.next = list.head
-		list.head = new_node
+		list.head.prev = created
+		created.next = list.head
+		list.head = created
 	}
 	list.len += 1
 }
@@ -165,7 +166,7 @@ pub fn (mut list DoublyLinkedList[T]) insert(idx int, item T) ! {
 // when idx > list.len/2. This helper function assumes idx bounds have
 // already been checked and idx is not at the edges.
 fn (mut list DoublyLinkedList[T]) insert_back(idx int, item T) {
-	mut node := list.node(idx + 1)
+	mut node := list.node(idx)
 	mut prev := node.prev
 	//   prev       node
 	//  ------     ------
@@ -226,7 +227,7 @@ fn (list &DoublyLinkedList[T]) node(idx int) &DoublyListNode[T] {
 		return node
 	}
 	mut node := list.tail
-	for t := list.len - 1; t >= idx; t -= 1 {
+	for t := list.len - 1; t > idx; t -= 1 {
 		node = node.prev
 	}
 	return node

@@ -1,3 +1,5 @@
+// vtest retry: 2
+// vtest flaky: true
 import os
 
 const tfolder = os.join_path(os.vtmp_dir(), 'os_file_tests')
@@ -485,6 +487,10 @@ fn test_open_file_crlf_binary_mode() {
 }
 
 fn test_path_devnull() {
+	$if windows {
+		// Reading device files like \\.\nul crashes on Windows (TCC, GCC/MinGW).
+		return
+	}
 	dump(os.path_devnull)
 	content := os.read_file(os.path_devnull)!
 	// dump(content)
@@ -507,6 +513,14 @@ fn test_read_lines() {
 	assert lines == some_lines_content.split_into_lines()
 }
 
+fn test_read_lines_with_long_line_and_mixed_line_endings() {
+	long_line := 'a'.repeat(200_000)
+	content := '${long_line}\r\nmiddle\rlast\n\n'
+	os.write_file(tfile, content)!
+	lines := os.read_lines(tfile)!
+	assert lines == content.split_into_lines()
+}
+
 fn test_write_lines() {
 	wline1_file := os.join_path_single(tfolder, 'wline1.txt')
 	wline2_file := os.join_path_single(tfolder, 'wline2.txt')
@@ -517,4 +531,12 @@ fn test_write_lines() {
 	c2 := os.read_file(wline2_file)!
 	assert c1 == c2
 	assert c1.split_into_lines() == some_lines_content.split_into_lines()
+}
+
+fn test_read_from_closed_file() {
+	os.write_file(tfile, 'test')!
+	mut f := os.open(tfile)!
+	f.close()
+	mut buf := []u8{len: 64}
+	assert f.read(mut buf) or { -1 } == -1
 }

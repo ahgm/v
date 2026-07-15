@@ -17,6 +17,8 @@ pub fn (mut ctx ServerContext) not_found() veb.Result {
 }
 
 pub struct ServerApp {
+mut:
+	server        &veb.Server = unsafe { nil }
 	port          int
 	timeout       int
 	global_config Config
@@ -58,8 +60,10 @@ fn main() {
 	)!
 }
 
-// pub fn (mut app ServerApp) init_server() {
-//}
+// init_server stores the veb server handle when lifecycle control is available.
+pub fn (mut app ServerApp) init_server(server &veb.Server) {
+	app.server = server
+}
 
 pub fn (mut app ServerApp) index(mut ctx ServerContext) veb.Result {
 	assert app.global_config.max_ping == 50
@@ -93,7 +97,6 @@ pub fn (mut app ServerApp) user_repo_settings(mut ctx ServerContext, username st
 
 @['/json_echo'; post]
 pub fn (mut app ServerApp) json_echo(mut ctx ServerContext) veb.Result {
-	// eprintln('>>>>> received http request at /json_echo is: $app.req')
 	ctx.set_content_type(ctx.req.header.get(.content_type) or { '' })
 	return ctx.ok(ctx.req.data)
 }
@@ -127,7 +130,6 @@ pub fn (mut app ServerApp) query_echo(mut ctx ServerContext, a string, b int) ve
 // Make sure [post] works without the path
 @[post]
 pub fn (mut app ServerApp) json(mut ctx ServerContext) veb.Result {
-	// eprintln('>>>>> received http request at /json is: $app.req')
 	ctx.set_content_type(ctx.req.header.get(.content_type) or { '' })
 	return ctx.ok(ctx.req.data)
 }
@@ -135,6 +137,11 @@ pub fn (mut app ServerApp) json(mut ctx ServerContext) veb.Result {
 @[host: 'example.com']
 @['/with_host']
 pub fn (mut app ServerApp) with_host(mut ctx ServerContext) veb.Result {
+	return ctx.ok('')
+}
+
+@['/empty_response_body']
+pub fn (mut app ServerApp) empty_response_body(mut ctx ServerContext) veb.Result {
 	return ctx.ok('')
 }
 

@@ -10,11 +10,20 @@
 ## OF REBUILDING, FOR EASIER/RELIABLE REPRODUCTION OF HISTORIC VERSIONS.
 ## IT IS NOT INTENDED TO BE MODIFIED.
 
-BUILD_CMD=`fc -nl -0`
+
+if test -z "$BUILD_CMD"; then
+  BUILD_CMD="$(fc -nl -0 2>/dev/null || true)"
+fi
 ## remove whitespaces before/after the actual command:
 BUILD_CMD="$(echo "${BUILD_CMD}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+if test -z "$BUILD_CMD"; then
+  BUILD_CMD="$0"
+fi
 
 set -e
+
+## make sure that commands use English in their output, instead of the local system's local:
+export LANG=C
 
 if ! test -f vlib/v/compiler_errors_test.v; then
   echo "this script should be run in V's main repo folder!"
@@ -26,7 +35,7 @@ export CURRENT_SCRIPT_PATH=$(realpath "$0")
 
 export TCC_COMMIT="${TCC_COMMIT:-mob}"
 export TCC_FOLDER="${TCC_FOLDER:-thirdparty/tcc.$TCC_COMMIT}"
-export CC="${CC:-gcc}"
+export CC="${CC:-clang}"
 
 echo " BUILD_CMD: \`$BUILD_CMD\`"
 echo "        CC: $CC"
@@ -41,7 +50,7 @@ rsync -a thirdparty/tcc/ thirdparty/tcc.original/
 
 pushd .
 
-git clone git://repo.or.cz/tinycc.git
+git clone https://repo.or.cz/tinycc.git
 
 cd tinycc
 
@@ -103,4 +112,3 @@ popd
 
 echo "tcc commit: $TCC_COMMIT , full hash: $TCC_COMMIT_FULL_HASH ."
 echo "The tcc executable is ready in $TCC_FOLDER/tcc.exe"
-

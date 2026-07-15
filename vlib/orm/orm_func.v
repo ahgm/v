@@ -6,6 +6,12 @@ import strings.textscanner
 const operators = ['=', '!=', '<>', '>=', '<=', '>', '<', 'LIKE', 'ILIKE', 'IS NULL', 'IS NOT NULL',
 	'IN', 'NOT IN']!
 
+pub struct AggregateValue {
+pub:
+	has_value bool
+	value     Primitive = Null{}
+}
+
 @[heap]
 pub struct QueryBuilder[T] {
 pub mut:
@@ -25,7 +31,7 @@ pub fn new_query[T](conn Connection) &QueryBuilder[T] {
 		valid_sql_field_names: meta.map(sql_field_name(it))
 		conn:                  conn
 		config:                SelectConfig{
-			table: table_from_struct[T]()
+			table: table_from_struct[T](meta)
 		}
 		data:                  QueryData{}
 		where:                 QueryData{}
@@ -54,7 +60,7 @@ pub fn (qb_ &QueryBuilder[T]) where(condition string, params ...Primitive) !&Que
 		// skip first field
 		qb.where.is_and << true // and
 	}
-	qb.parse_conditions(condition, params)!
+	qb.parse_conditions(condition, normalize_primitive_arguments(params))!
 	qb.config.has_where = true
 	return qb
 }
@@ -66,9 +72,45 @@ pub fn (qb_ &QueryBuilder[T]) or_where(condition string, params ...Primitive) !&
 		// skip first field
 		qb.where.is_and << false // or
 	}
-	qb.parse_conditions(condition, params)!
+	qb.parse_conditions(condition, normalize_primitive_arguments(params))!
 	qb.config.has_where = true
 	return qb
+}
+
+fn normalize_primitive_arguments(params []Primitive) []Primitive {
+	mut normalized := []Primitive{cap: params.len}
+	for param in params {
+		normalized << primitive_value(param)
+	}
+	return normalized
+}
+
+fn primitive_value(value Primitive) Primitive {
+	return match value {
+		[]bool { primitive_array(value) }
+		[]f32 { primitive_array(value) }
+		[]f64 { primitive_array(value) }
+		[]i16 { primitive_array(value) }
+		[]i64 { primitive_array(value) }
+		[]i8 { primitive_array(value) }
+		[]int { primitive_array(value) }
+		[]string { primitive_array(value) }
+		[]time.Time { primitive_array(value) }
+		[]u16 { primitive_array(value) }
+		[]u32 { primitive_array(value) }
+		[]u64 { primitive_array(value) }
+		[]u8 { primitive_array(value) }
+		[]InfixType { primitive_array(value) }
+		else { value }
+	}
+}
+
+fn primitive_array[T](values []T) []Primitive {
+	mut out := []Primitive{cap: values.len}
+	for value in values {
+		out << Primitive(value)
+	}
+	return out
 }
 
 fn parse_error(msg string, pos int, conds string) ! {
@@ -233,6 +275,7 @@ fn (qb_ &QueryBuilder[T]) parse_conditions(conds string, params []Primitive) ! {
 						OperationKind.eq
 					}
 				}
+
 				if current_op in [.is_null, .is_not_null]! {
 					qb.where.fields << current_field
 					qb.where.kinds << current_op
@@ -277,8 +320,8 @@ fn (qb_ &QueryBuilder[T]) parse_conditions(conds string, params []Primitive) ! {
 					current_is_and = false
 					state = .field
 				} else {
-					parse_error('${@FN}(): unexpected `${tok}`, maybe `AND`,`OR`', s.last_tok_start,
-						conds)!
+					parse_error('${@FN}(): unexpected `${tok}`, maybe `AND`,`OR`',
+						s.last_tok_start, conds)!
 				}
 			}
 		}
@@ -336,6 +379,13 @@ pub fn (qb_ &QueryBuilder[T]) select(fields ...string) !&QueryBuilder[T] {
 	return qb
 }
 
+// distinct marks the query as `SELECT DISTINCT`.
+pub fn (qb_ &QueryBuilder[T]) distinct() !&QueryBuilder[T] {
+	mut qb := unsafe { qb_ }
+	qb.config.has_distinct = true
+	return qb
+}
+
 // set create a `set` clause for `update`
 pub fn (qb_ &QueryBuilder[T]) set(assign string, values ...Primitive) !&QueryBuilder[T] {
 	mut qb := unsafe { qb_ }
@@ -362,24 +412,38 @@ pub fn (qb_ &QueryBuilder[T]) set(assign string, values ...Primitive) !&QueryBui
 		}
 		fields << field
 	}
-	qb.data.fields = fields
-	qb.data.data = values
+	qb.data.fields << fields
+	for v in values {
+		qb.data.data << v
+	}
 	return qb
 }
 
 // table_from_struct get table from struct
-fn table_from_struct[T]() Table {
+fn table_from_struct[T](meta []TableField) Table {
 	mut table_name := T.name
+	// Strip generic parameters from type name (e.g., Message[Payload] -> Message)
+	if bracket_pos := table_name.index('[') {
+		table_name = table_name[..bracket_pos]
+	}
+	mut has_custom_table_name := false
 	mut attrs := []VAttribute{}
 	$for a in T.attributes {
 		$if a.name == 'table' && a.has_arg {
 			table_name = a.arg
+			has_custom_table_name = true
 		}
 		attrs << a
 	}
+	if !has_custom_table_name {
+		// Keep default ORM table names aligned with unquoted SQL identifiers across DB drivers.
+		table_name = table_name.to_lower()
+	}
 	return Table{
-		name:  table_name
-		attrs: attrs
+		name:    table_name
+		attrs:   attrs
+		fields:  meta.map(it.name)
+		columns: meta.map(sql_field_name(it))
 	}
 }
 
@@ -387,65 +451,67 @@ fn table_from_struct[T]() Table {
 fn struct_meta[T]() []TableField {
 	mut meta := []TableField{}
 	$for field in T.fields {
-		mut attrs := []VAttribute{}
-		mut is_skip := false
-		for attr in field.attrs {
-			f := attr.split_any(':')
-			if f.len == 1 {
-				ff := f[0].trim_space()
-				if ff == 'skip' {
-					is_skip = true
+		if !field.is_embed {
+			mut attrs := []VAttribute{}
+			mut is_skip := false
+			for attr in field.attrs {
+				f := attr.split_any(':')
+				if f.len == 1 {
+					ff := f[0].trim_space()
+					if ff == 'skip' {
+						is_skip = true
+					}
+					attrs << VAttribute{
+						name: ff
+					}
+					continue
 				}
-				attrs << VAttribute{
-					name: ff
+				if f.len == 2 {
+					ff := f[1].trim_space()
+					if f[0].trim_space() == 'sql' && ff == '-' {
+						is_skip = true
+					}
+					mut kind := AttributeKind.plain
+					if ff == 'true' || ff == 'false' {
+						kind = .bool
+					} else if ff.starts_with('if ') {
+						kind = .comptime_define
+					} else if (ff.starts_with("'") && ff.ends_with("'"))
+						|| (ff.starts_with('"') && ff.ends_with('"')) {
+						kind = .string
+					} else if ff.contains_only('0123456789') {
+						kind = .number
+					} else if ff !in ['serial', 'i8', 'i16', 'int', 'i64', 'u8', 'u16', 'u32',
+						'u64', 'f32', 'f64', 'bool', 'string'] {
+						// @[sql: data_type] need kind = .plain
+						// @[sql: column_name] need kind = .string
+						kind = .string
+					}
+					attrs << VAttribute{
+						name:    f[0].trim_space()
+						has_arg: true
+						arg:     ff
+						kind:    kind
+					}
 				}
-				continue
 			}
-			if f.len == 2 {
-				ff := f[1].trim_space()
-				if f[0].trim_space() == 'sql' && ff == '-' {
-					is_skip = true
-				}
-				mut kind := AttributeKind.plain
-				if ff == 'true' || ff == 'false' {
-					kind = .bool
-				} else if ff.starts_with('if ') {
-					kind = .comptime_define
-				} else if (ff.starts_with("'") && ff.ends_with("'"))
-					|| (ff.starts_with('"') && ff.ends_with('"')) {
-					kind = .string
-				} else if ff.contains_only('0123456789') {
-					kind = .number
-				} else if ff !in ['serial', 'i8', 'i16', 'int', 'i64', 'u8', 'u16', 'u32', 'u64',
-					'f32', 'f64', 'bool', 'string'] {
-					// @[sql: data_type] need kind = .plain
-					// @[sql: column_name] need kind = .string
-					kind = .string
-				}
-				attrs << VAttribute{
-					name:    f[0].trim_space()
-					has_arg: true
-					arg:     ff
-					kind:    kind
-				}
+
+			mut field_type := field.typ
+			if typeof(field).name.contains('time.Time') {
+				field_type = time_
+			} else if field.is_struct {
+				field_type = type_idx['int']
+			} else if field.is_enum {
+				field_type = enum_
 			}
-		}
 
-		mut field_type := field.typ
-		if typeof(field).name.contains('time.Time') {
-			field_type = time_
-		} else if field.is_struct {
-			field_type = type_idx['int']
-		} else if field.is_enum {
-			field_type = enum_
-		}
-
-		if !is_skip {
-			meta << TableField{
-				name:     field.name
-				typ:      field_type
-				nullable: field.is_option
-				attrs:    attrs
+			if !is_skip {
+				meta << TableField{
+					name:     field.name
+					typ:      field_type
+					nullable: field.is_option
+					attrs:    attrs
+				}
 			}
 		}
 	}
@@ -471,7 +537,7 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 					}
 				}
 				if value != Primitive(Null{}) {
-					$if field.typ is i8 || field.typ is ?i8 {
+					$if field.unaliased_typ is i8 || field.unaliased_typ is ?i8 {
 						instance.$(field.name) = match value {
 							i8 { i8(value) }
 							i16 { i8(value) }
@@ -482,9 +548,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { i8(value) }
 							u64 { i8(value) }
 							bool { i8(value) }
+							f32 { i8(value) }
+							f64 { i8(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is i16 || field.typ is ?i16 {
+					} $else $if field.unaliased_typ is i16 || field.unaliased_typ is ?i16 {
 						instance.$(field.name) = match value {
 							i8 { i16(value) }
 							i16 { i16(value) }
@@ -495,9 +563,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { i16(value) }
 							u64 { i16(value) }
 							bool { i16(value) }
+							f32 { i16(value) }
+							f64 { i16(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is int || field.typ is ?int {
+					} $else $if field.unaliased_typ is int || field.unaliased_typ is ?int {
 						instance.$(field.name) = match value {
 							i8 { int(value) }
 							i16 { int(value) }
@@ -508,9 +578,12 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { int(value) }
 							u64 { int(value) }
 							bool { int(value) }
+							f32 { int(value) }
+							f64 { int(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is i64 || field.typ is ?i64 {
+					} $else $if field.unaliased_typ is i64 || field.unaliased_typ is ?i64
+						|| field.unaliased_typ is $enum {
 						instance.$(field.name) = match value {
 							i8 { i64(value) }
 							i16 { i64(value) }
@@ -521,9 +594,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { i64(value) }
 							u64 { i64(value) }
 							bool { i64(value) }
+							f32 { i64(value) }
+							f64 { i64(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is u8 || field.typ is ?u8 {
+					} $else $if field.unaliased_typ is u8 || field.unaliased_typ is ?u8 {
 						instance.$(field.name) = match value {
 							i8 { u8(value) }
 							i16 { u8(value) }
@@ -534,9 +609,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { u8(value) }
 							u64 { u8(value) }
 							bool { u8(value) }
+							f32 { u8(value) }
+							f64 { u8(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is u16 || field.typ is ?u16 {
+					} $else $if field.unaliased_typ is u16 || field.unaliased_typ is ?u16 {
 						instance.$(field.name) = match value {
 							i8 { u16(value) }
 							i16 { u16(value) }
@@ -547,9 +624,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { u16(value) }
 							u64 { u16(value) }
 							bool { u16(value) }
+							f32 { u16(value) }
+							f64 { u16(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is u32 || field.typ is ?u32 {
+					} $else $if field.unaliased_typ is u32 || field.unaliased_typ is ?u32 {
 						instance.$(field.name) = match value {
 							i8 { u32(value) }
 							i16 { u32(value) }
@@ -560,9 +639,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { u32(value) }
 							u64 { u32(value) }
 							bool { u32(value) }
+							f32 { u32(value) }
+							f64 { u32(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is u64 || field.typ is ?u64 {
+					} $else $if field.unaliased_typ is u64 || field.unaliased_typ is ?u64 {
 						instance.$(field.name) = match value {
 							i8 { u64(value) }
 							i16 { u64(value) }
@@ -573,9 +654,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { u64(value) }
 							u64 { u64(value) }
 							bool { u64(value) }
+							f32 { u64(value) }
+							f64 { u64(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is f32 || field.typ is ?f32 {
+					} $else $if field.unaliased_typ is f32 || field.unaliased_typ is ?f32 {
 						instance.$(field.name) = match value {
 							i8 { f32(value) }
 							i16 { f32(value) }
@@ -586,9 +669,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { f32(value) }
 							u64 { f32(value) }
 							bool { f32(value) }
+							f32 { value }
+							f64 { f32(value) }
 							else { 0 }
 						}
-					} $else $if field.typ is f64 || field.typ is ?f64 {
+					} $else $if field.unaliased_typ is f64 || field.unaliased_typ is ?f64 {
 						instance.$(field.name) = match value {
 							i8 { f64(value) }
 							i16 { f64(value) }
@@ -599,9 +684,11 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { f64(value) }
 							u64 { f64(value) }
 							bool { f64(value) }
+							f32 { f64(value) }
+							f64 { value }
 							else { 0 }
 						}
-					} $else $if field.typ is bool || field.typ is ?bool {
+					} $else $if field.unaliased_typ is bool || field.unaliased_typ is ?bool {
 						instance.$(field.name) = match value {
 							i8 { value != 0 }
 							i16 { value != 0 }
@@ -612,11 +699,14 @@ fn (qb &QueryBuilder[T]) map_row(row []Primitive) !T {
 							u32 { value != 0 }
 							u64 { value != 0 }
 							bool { value }
+							f32 { value != 0 }
+							f64 { value != 0 }
 							else { false }
 						}
-					} $else $if field.typ is string || field.typ is ?string {
+					} $else $if field.unaliased_typ is string || field.unaliased_typ is ?string {
 						instance.$(field.name) = value as string
-					} $else $if field.typ is time.Time || field.typ is ?time.Time {
+					} $else $if field.unaliased_typ is time.Time
+						|| field.unaliased_typ is ?time.Time {
 						if m.typ == time_ {
 							instance.$(field.name) = value as time.Time
 						} else if m.typ == type_string {
@@ -646,6 +736,21 @@ fn (qb_ &QueryBuilder[T]) prepare() ! {
 		qb.config.fields = qb.meta.map(sql_field_name(it))
 	}
 
+	if qb.config.select_exprs.len != qb.config.fields.len {
+		mut select_exprs := []string{cap: qb.config.fields.len}
+		for f in qb.config.fields {
+			mut select_expr := f
+			for ff in qb.meta {
+				if sql_field_name(ff) == f {
+					select_expr = sql_field_select_expr(ff)
+					break
+				}
+			}
+			select_exprs << select_expr
+		}
+		qb.config.select_exprs = select_exprs
+	}
+
 	if qb.config.types.len == 0 {
 		// set field's types
 		mut types := []int{cap: qb.config.fields.len}
@@ -657,6 +762,147 @@ fn (qb_ &QueryBuilder[T]) prepare() ! {
 			}
 		}
 		qb.config.types = types
+	}
+}
+
+fn (qb &QueryBuilder[T]) get_meta_field_by_sql_name(field string) ?TableField {
+	for meta_field in qb.meta {
+		if sql_field_name(meta_field) == field {
+			return meta_field
+		}
+	}
+	return none
+}
+
+fn is_numeric_type_idx(typ int) bool {
+	return typ in nums || typ in num64 || typ in float
+}
+
+fn is_min_max_supported_type_idx(typ int) bool {
+	return is_numeric_type_idx(typ) || typ == type_string || typ == time_
+}
+
+fn (qb &QueryBuilder[T]) validate_aggregate_field(kind AggregateKind, field string) !TableField {
+	meta_field := qb.get_meta_field_by_sql_name(field) or {
+		return error("${@FN}(): table `${qb.config.table}` has no field's name: `${field}`")
+	}
+	match kind {
+		.sum, .avg {
+			if !is_numeric_type_idx(meta_field.typ) {
+				msg := match kind {
+					.sum { '${@FN}(): `sum` requires a numeric field' }
+					.avg { '${@FN}(): `avg` requires a numeric field' }
+					else { '${@FN}(): aggregate requires a numeric field' }
+				}
+
+				return error(msg)
+			}
+		}
+		.min, .max {
+			if !is_min_max_supported_type_idx(meta_field.typ) {
+				msg := match kind {
+					.min { '${@FN}(): `min` requires a numeric, string, or time.Time field' }
+					.max { '${@FN}(): `max` requires a numeric, string, or time.Time field' }
+					else { '${@FN}(): aggregate requires a numeric, string, or time.Time field' }
+				}
+
+				return error(msg)
+			}
+		}
+		else {}
+	}
+
+	return meta_field
+}
+
+fn (qb &QueryBuilder[T]) build_aggregate_config(kind AggregateKind, field string) !SelectConfig {
+	mut cfg := qb.config
+	cfg.aggregate_kind = kind
+	cfg.aggregate_field = ''
+	cfg.fields = []
+	cfg.types = []
+	if kind == .count {
+		cfg.types = [type_idx['int']]
+		return cfg
+	}
+
+	meta_field := qb.validate_aggregate_field(kind, field)!
+	cfg.aggregate_field = field
+	cfg.fields = [field]
+	cfg.types = [if kind == .avg { type_idx['f64'] } else { meta_field.typ }]
+	return cfg
+}
+
+fn primitive_to_aggregate_value(value Primitive) AggregateValue {
+	return if value == Primitive(Null{}) {
+		AggregateValue{}
+	} else {
+		AggregateValue{
+			has_value: true
+			value:     value
+		}
+	}
+}
+
+// as_int returns the aggregate value as `int`, or `none` when it is null or not numeric.
+pub fn (value AggregateValue) as_int() ?int {
+	if !value.has_value {
+		return none
+	}
+	return match value.value {
+		i8 { int(value.value) }
+		i16 { int(value.value) }
+		int { value.value }
+		i64 { int(value.value) }
+		u8 { int(value.value) }
+		u16 { int(value.value) }
+		u32 { int(value.value) }
+		u64 { int(value.value) }
+		f32 { int(value.value) }
+		f64 { int(value.value) }
+		else { return none }
+	}
+}
+
+// as_f64 returns the aggregate value as `f64`, or `none` when it is null or not numeric.
+pub fn (value AggregateValue) as_f64() ?f64 {
+	if !value.has_value {
+		return none
+	}
+	return match value.value {
+		i8 { f64(value.value) }
+		i16 { f64(value.value) }
+		int { f64(value.value) }
+		i64 { f64(value.value) }
+		u8 { f64(value.value) }
+		u16 { f64(value.value) }
+		u32 { f64(value.value) }
+		u64 { f64(value.value) }
+		f32 { f64(value.value) }
+		f64 { value.value }
+		else { return none }
+	}
+}
+
+// as_string returns the aggregate value as `string`, or `none` when it is null or not a string.
+pub fn (value AggregateValue) as_string() ?string {
+	if !value.has_value {
+		return none
+	}
+	return match value.value {
+		string { value.value }
+		else { return none }
+	}
+}
+
+// as_time returns the aggregate value as `time.Time`, or `none` when it is null or not a time.
+pub fn (value AggregateValue) as_time() ?time.Time {
+	if !value.has_value {
+		return none
+	}
+	return match value.value {
+		time.Time { value.value }
+		else { return none }
 	}
 }
 
@@ -681,10 +927,8 @@ pub fn (qb_ &QueryBuilder[T]) count() !int {
 	defer {
 		qb.reset()
 	}
-	mut count_config := qb.config
-	count_config.is_count = true
-	count_config.fields = []
 	qb.prepare()!
+	count_config := qb.build_aggregate_config(.count, '')!
 	result := qb.conn.select(count_config, qb.data, qb.where)!
 
 	if result.len == 0 || result[0].len == 0 {
@@ -699,6 +943,70 @@ pub fn (qb_ &QueryBuilder[T]) count() !int {
 	}
 }
 
+// sum returns the sum of the field values as an `AggregateValue`.
+pub fn (qb_ &QueryBuilder[T]) sum(field string) !AggregateValue {
+	mut qb := unsafe { qb_ }
+	defer {
+		qb.reset()
+	}
+	qb.prepare()!
+	qb.validate_aggregate_field(.sum, field)!
+	cfg := qb.build_aggregate_config(.sum, field)!
+	result := qb.conn.select(cfg, qb.data, qb.where)!
+	if result.len == 0 || result[0].len == 0 {
+		return AggregateValue{}
+	}
+	return primitive_to_aggregate_value(result[0][0])
+}
+
+// min returns the smallest field value as an `AggregateValue`.
+pub fn (qb_ &QueryBuilder[T]) min(field string) !AggregateValue {
+	mut qb := unsafe { qb_ }
+	defer {
+		qb.reset()
+	}
+	qb.prepare()!
+	qb.validate_aggregate_field(.min, field)!
+	cfg := qb.build_aggregate_config(.min, field)!
+	result := qb.conn.select(cfg, qb.data, qb.where)!
+	if result.len == 0 || result[0].len == 0 {
+		return AggregateValue{}
+	}
+	return primitive_to_aggregate_value(result[0][0])
+}
+
+// max returns the largest field value as an `AggregateValue`.
+pub fn (qb_ &QueryBuilder[T]) max(field string) !AggregateValue {
+	mut qb := unsafe { qb_ }
+	defer {
+		qb.reset()
+	}
+	qb.prepare()!
+	qb.validate_aggregate_field(.max, field)!
+	cfg := qb.build_aggregate_config(.max, field)!
+	result := qb.conn.select(cfg, qb.data, qb.where)!
+	if result.len == 0 || result[0].len == 0 {
+		return AggregateValue{}
+	}
+	return primitive_to_aggregate_value(result[0][0])
+}
+
+// avg returns the average field value as an `AggregateValue`.
+pub fn (qb_ &QueryBuilder[T]) avg(field string) !AggregateValue {
+	mut qb := unsafe { qb_ }
+	defer {
+		qb.reset()
+	}
+	qb.prepare()!
+	qb.validate_aggregate_field(.avg, field)!
+	cfg := qb.build_aggregate_config(.avg, field)!
+	result := qb.conn.select(cfg, qb.data, qb.where)!
+	if result.len == 0 || result[0].len == 0 {
+		return AggregateValue{}
+	}
+	return primitive_to_aggregate_value(result[0][0])
+}
+
 // insert insert a record into the database
 pub fn (qb_ &QueryBuilder[T]) insert[T](value T) !&QueryBuilder[T] {
 	mut qb := unsafe { qb_ }
@@ -710,6 +1018,7 @@ pub fn (qb_ &QueryBuilder[T]) insert[T](value T) !&QueryBuilder[T] {
 }
 
 // insert_many insert records into the database
+// Uses batch INSERT for efficiency when inserting multiple records.
 pub fn (qb_ &QueryBuilder[T]) insert_many[T](values []T) !&QueryBuilder[T] {
 	mut qb := unsafe { qb_ }
 	defer {
@@ -719,11 +1028,70 @@ pub fn (qb_ &QueryBuilder[T]) insert_many[T](values []T) !&QueryBuilder[T] {
 	if values.len == 0 {
 		return error('${@FN}(): `insert` need at least one record')
 	}
-	for value in values {
-		new_qb := fill_data_with_struct[T](value, qb.meta)
-		qb.conn.insert(qb.config.table, new_qb)!
+	mut batch := fill_data_with_struct[T](values[0], qb.meta)
+	batch.batch_rows = values.len
+	for i in 1 .. values.len {
+		next := fill_data_with_struct[T](values[i], qb.meta)
+		for d in next.data {
+			batch.data << d
+		}
 	}
+	qb.conn.insert(qb.config.table, batch)!
 	return qb
+}
+
+// save updates all mapped fields in `value` using the struct primary key or `id` field.
+pub fn save[T](conn Connection, value T) ! {
+	mut qb := new_query[T](conn)
+	data, where := build_save_query_data[T](qb.meta, qb.config.table.name, value)!
+	qb.conn.update(qb.config.table, data, where)!
+}
+
+fn build_save_query_data[T](meta []TableField, table_name string, value T) !(QueryData, QueryData) {
+	data := fill_data_with_struct[T](value, meta)
+	if data.fields.len != data.data.len {
+		return error('${@FN}(): table `${table_name}` contains fields that `save` cannot map automatically')
+	}
+	primary_field_name := find_save_primary_field_name(meta) or {
+		return error('${@FN}(): table `${table_name}` needs a primary key or `id` field to use `save`')
+	}
+	mut update_data := QueryData{}
+	mut where_data := QueryData{
+		kinds: [.eq]
+	}
+	for i, field_name in data.fields {
+		if field_name == primary_field_name {
+			where_data.fields << field_name
+			where_data.data << data.data[i]
+			continue
+		}
+		update_data.fields << field_name
+		update_data.data << data.data[i]
+	}
+	if where_data.fields.len == 0 {
+		return error('${@FN}(): struct value is missing the primary key field `${primary_field_name}`')
+	}
+	if update_data.fields.len == 0 {
+		return error('${@FN}(): no updatable fields were found for table `${table_name}`')
+	}
+	return update_data, where_data
+}
+
+fn find_save_primary_field_name(meta []TableField) ?string {
+	for field in meta {
+		for attr in field.attrs {
+			if attr_name_matches(attr.name, 'primary') {
+				return sql_field_name(field)
+			}
+		}
+	}
+	for field in meta {
+		field_name := sql_field_name(field)
+		if field.name == 'id' || field_name == 'id' {
+			return field_name
+		}
+	}
+	return none
 }
 
 fn fill_data_with_struct[T](value T, meta []TableField) QueryData {
@@ -741,72 +1109,72 @@ fn fill_data_with_struct[T](value T, meta []TableField) QueryData {
 			}
 			qb.fields << sql_f_name
 
-			$if field.typ is bool {
-				qb.data << bool_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?bool {
+			$if field.unaliased_typ is bool {
+				qb.data << bool_to_primitive(bool(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?bool {
 				qb.data << option_bool_to_primitive(value.$(field.name))
 			}
-			$if field.typ is f32 {
-				qb.data << f32_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?f32 {
+			$if field.unaliased_typ is f32 {
+				qb.data << f32_to_primitive(f32(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?f32 {
 				qb.data << option_f32_to_primitive(value.$(field.name))
 			}
-			$if field.typ is f64 {
-				qb.data << f64_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?f64 {
+			$if field.unaliased_typ is f64 {
+				qb.data << f64_to_primitive(f64(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?f64 {
 				qb.data << option_f64_to_primitive(value.$(field.name))
 			}
-			$if field.typ is i8 {
-				qb.data << i8_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?i8 {
+			$if field.unaliased_typ is i8 {
+				qb.data << i8_to_primitive(i8(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?i8 {
 				qb.data << option_i8_to_primitive(value.$(field.name))
 			}
-			$if field.typ is i16 {
-				qb.data << i16_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?i16 {
+			$if field.unaliased_typ is i16 {
+				qb.data << i16_to_primitive(i16(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?i16 {
 				qb.data << option_i16_to_primitive(value.$(field.name))
 			}
-			$if field.typ is int {
-				qb.data << int_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?int {
+			$if field.unaliased_typ is int {
+				qb.data << int_to_primitive(int(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?int {
 				qb.data << option_int_to_primitive(value.$(field.name))
 			}
-			$if field.typ is i64 {
-				qb.data << i64_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?i64 {
+			$if field.unaliased_typ is i64 {
+				qb.data << i64_to_primitive(i64(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?i64 {
 				qb.data << option_i64_to_primitive(value.$(field.name))
 			}
-			$if field.typ is u8 {
-				qb.data << u8_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?u8 {
+			$if field.unaliased_typ is u8 {
+				qb.data << u8_to_primitive(u8(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?u8 {
 				qb.data << option_u8_to_primitive(value.$(field.name))
 			}
-			$if field.typ is u16 {
-				qb.data << u16_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?u16 {
+			$if field.unaliased_typ is u16 {
+				qb.data << u16_to_primitive(u16(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?u16 {
 				qb.data << option_u16_to_primitive(value.$(field.name))
 			}
-			$if field.typ is u32 {
-				qb.data << u32_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?u32 {
+			$if field.unaliased_typ is u32 {
+				qb.data << u32_to_primitive(u32(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?u32 {
 				qb.data << option_u32_to_primitive(value.$(field.name))
 			}
-			$if field.typ is u64 {
-				qb.data << u64_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?u64 {
+			$if field.unaliased_typ is u64 {
+				qb.data << u64_to_primitive(u64(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?u64 {
 				qb.data << option_u64_to_primitive(value.$(field.name))
 			}
-			$if field.typ is string {
-				qb.data << string_to_primitive(value.$(field.name))
-			} $else $if field.typ is ?string {
+			$if field.unaliased_typ is string {
+				qb.data << string_to_primitive(string(value.$(field.name)))
+			} $else $if field.unaliased_typ is ?string {
 				qb.data << option_string_to_primitive(value.$(field.name))
-			} $else $if field.typ is time.Time {
+			} $else $if field.unaliased_typ is time.Time {
 				if sql_f_type == type_string {
 					qb.data << string_to_primitive(value.$(field.name).format_ss())
 				} else {
 					qb.data << time_to_primitive(value.$(field.name))
 				}
-			} $else $if field.typ is ?time.Time {
+			} $else $if field.unaliased_typ is ?time.Time {
 				if sql_f_type == type_string {
 					b := value.$(field.name)
 					if b_ := b {
@@ -817,6 +1185,8 @@ fn fill_data_with_struct[T](value T, meta []TableField) QueryData {
 				} else {
 					qb.data << option_time_to_primitive(value.$(field.name))
 				}
+			} $else $if field.unaliased_typ is $enum {
+				qb.data << i64_to_primitive(i64(value.$(field.name)))
 			}
 		}
 	}
@@ -835,6 +1205,75 @@ pub fn (qb_ &QueryBuilder[T]) update() !&QueryBuilder[T] {
 	}
 	qb.conn.update(qb.config.table, qb.data, qb.where)!
 	return qb
+}
+
+// update_many updates multiple records by a key field, using batch CASE WHEN for efficiency.
+// key_field is the column used to match rows (e.g. 'id').
+// field_names selects which columns to update; if empty, all struct fields except key_field are updated.
+pub fn update_many[T](mut conn Connection, values []T, key_field string, field_names ...string) ! {
+	if values.len == 0 {
+		return error('${@FN}(): need at least one record')
+	}
+	mut qb := new_query[T](conn)
+
+	// Build the field list from the first value
+	first := fill_data_with_struct[T](values[0], qb.meta)
+	mut key_index := -1
+	mut value_fields := []string{}
+	mut value_indexes := []int{}
+
+	for i, field in first.fields {
+		if field == key_field {
+			key_index = i
+		} else if field_names.len == 0 || field in field_names {
+			value_fields << field
+			value_indexes << i
+		}
+	}
+
+	if key_index < 0 {
+		return error('${@FN}(): key field `${key_field}` not found in table `${qb.config.table.name}`')
+	}
+
+	if value_fields.len == 0 {
+		return error('${@FN}(): no updatable fields found for table `${qb.config.table.name}`')
+	}
+
+	mut update_data := QueryData{
+		fields:     value_fields
+		batch_rows: values.len
+		batch_key:  key_field
+	}
+
+	// Build data: per value_field, per row: [key_value, value_field_value]
+	rows := values.map(fill_data_with_struct[T](it, qb.meta))
+
+	for fj in value_indexes {
+		for row in rows {
+			if key_index < row.data.len {
+				update_data.data << row.data[key_index]
+			}
+			if fj < row.data.len {
+				update_data.data << row.data[fj]
+			}
+		}
+	}
+
+	// Build WHERE clause using IN
+	mut key_values := []Primitive{}
+	for row in rows {
+		if key_index < row.data.len {
+			key_values << row.data[key_index]
+		}
+	}
+
+	mut where_data := QueryData{
+		fields: [key_field]
+		data:   [Primitive(key_values)]
+		kinds:  [.in]
+	}
+
+	conn.update(qb.config.table, update_data, where_data)!
 }
 
 // delete delete record(s) in the database

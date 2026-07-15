@@ -49,13 +49,13 @@ fn test_atof() {
 		mut s1 := (strconv.atof_quick(src_num_str[c]).str())
 		mut s2 := (x.str())
 		delta := s1.f64() - s2.f64()
-		// println("$s1 $s2 $delta")
+		// println("${s1} ${s2} ${delta}")
 		assert delta < f64(1e-16)
 
 		// test C.atof
 		n1 := x.strsci(18)
 		n2 := f64(C.atof(&char(src_num_str[c].str))).strsci(18)
-		// println("$n1 $n2")
+		// println("${n1} ${n2}")
 		assert n1 == n2
 	}
 
@@ -80,6 +80,38 @@ fn test_atof() {
 	f1 = -0.0
 	assert *ptr == u64(0x8000000000000000)
 	println('DONE!')
+}
+
+fn test_atof_subnormal() {
+	// Test subnormal (denormalized) float numbers and edge cases
+	// These are very small numbers close to the f64 minimum
+	// IMPORTANT: Compare with hardcoded f64 literals, not .f64() which uses the same parser
+
+	// Normal numbers
+	assert strconv.atof64('1.0e-250') or { panic('parse error') } == 1.0e-250
+	assert strconv.atof64('2.5e-260') or { panic('parse error') } == 2.5e-260
+
+	// Transition zone
+	assert strconv.atof64('1.0e-300') or { panic('parse error') } == 1.0e-300
+	assert strconv.atof64('2.2250738585072014e-308') or { panic('parse error') } == 2.2250738585072014e-308
+
+	// Subnormal numbers (these fail without the fix)
+	assert strconv.atof64('1.23e-308') or { panic('parse error') } == 1.23e-308
+	assert strconv.atof64('1.0e-310') or { panic('parse error') } == 1.0e-310
+	assert strconv.atof64('5.0e-320') or { panic('parse error') } == 5.0e-320
+	assert strconv.atof64('5e-324') or { panic('parse error') } == 5e-324
+
+	// Negative subnormal
+	assert strconv.atof64('-1.0e-320') or { panic('parse error') } == -1.0e-320
+}
+
+fn test_atof_small_decimal_with_many_leading_zeroes() {
+	assert strconv.atof64('0.0000000000000000005') or { panic('parse error') } == strconv.atof64('5e-19') or {
+		panic('parse error')
+	}
+	assert strconv.atof64('-0.0000000000000000005') or { panic('parse error') } == strconv.atof64('-5e-19') or {
+		panic('parse error')
+	}
 }
 
 fn test_atof_errors() {

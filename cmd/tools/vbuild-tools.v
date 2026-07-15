@@ -11,7 +11,11 @@ import v.util
 // should be compiled (v folder).
 // To implement that, these folders are initially skipped, then added
 // as a whole *after the testing.prepare_test_session call*.
-const tools_in_subfolders = ['vast', 'vcreate', 'vdoc', 'vpm', 'vsymlink', 'vvet', 'vwhere', 'vcover']
+const tools_in_subfolders = ['vast', 'vcreate', 'vdoc', 'vpm', 'vsqlite', 'vsymlink', 'vvet',
+	'vwhere', 'vcover']
+
+// v2 is temporarily disabled, so tools that depend on it are skipped too.
+const temporarily_disabled_tool_subfolders = ['vast2']
 
 // non_packaged_tools are tools that should not be packaged with
 // prebuild versions of V, to keep the size smaller.
@@ -35,6 +39,9 @@ fn main() {
 	for stool in tools_in_subfolders {
 		skips << os.join_path(tfolder, stool).replace('\\', '/')
 	}
+	for stool in temporarily_disabled_tool_subfolders {
+		skips << os.join_path(tfolder, stool).replace('\\', '/')
+	}
 	buildopts := args_string.all_before('build-tools')
 	mut session := testing.prepare_test_session(buildopts, folder, skips, main_label)
 	session.rm_binaries = false
@@ -42,8 +49,8 @@ fn main() {
 	for stool in tools_in_subfolders {
 		session.add(os.join_path(tfolder, stool))
 	}
-	// eprintln('> session.files: $session.files')
-	// eprintln('> session.skip_files: $session.skip_files')
+	// eprintln('> session.files: ${session.files}')
+	// eprintln('> session.skip_files: ${session.skip_files}')
 	session.test()
 	eprintln(session.benchmark.total_message(finish_label))
 	if session.failed_cmds.len > 0 {

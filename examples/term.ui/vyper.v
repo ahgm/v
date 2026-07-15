@@ -1,6 +1,7 @@
 // import modules for use in app
 import term.ui as termui
 import rand
+import math.vec
 
 // define some global constants
 const block_size = 1
@@ -29,11 +30,7 @@ enum GameState {
 }
 
 // simple 2d vector representation
-struct Vec {
-mut:
-	x int
-	y int
-}
+type Vec = vec.Vec2[int]
 
 // determine orientation from vector (hacky way to set facing from velocity)
 fn (v Vec) facing() Orientation {
@@ -58,10 +55,7 @@ fn (mut v Vec) randomize(min_x int, min_y int, max_x int, max_y int) {
 // part of snake's body representation
 struct BodyPart {
 mut:
-	pos    Vec = Vec{
-		x: block_size
-		y: block_size
-	}
+	pos    Vec          = Vec{block_size, block_size}
 	color  termui.Color = green
 	facing Orientation  = .top
 }
@@ -72,10 +66,7 @@ mut:
 	app       &App = unsafe { nil }
 	direction Orientation
 	body      []BodyPart
-	velocity  Vec = Vec{
-		x: 0
-		y: 0
-	}
+	velocity  Vec
 }
 
 // length returns the snake's current length
@@ -85,27 +76,28 @@ fn (s Snake) length() int {
 
 // impulse provides a impulse to change the snake's direction
 fn (mut s Snake) impulse(direction Orientation) {
-	mut vec := Vec{}
+	mut vel := Vec{}
 	match direction {
 		.top {
-			vec.x = 0
-			vec.y = -1 * block_size
+			vel.x = 0
+			vel.y = -1 * block_size
 		}
 		.right {
-			vec.x = 2 * block_size
-			vec.y = 0
+			vel.x = 2 * block_size
+			vel.y = 0
 		}
 		.bottom {
-			vec.x = 0
-			vec.y = block_size
+			vel.x = 0
+			vel.y = block_size
 		}
 		.left {
-			vec.x = -2 * block_size
-			vec.y = 0
+			vel.x = -2 * block_size
+			vel.y = 0
 		}
 	}
+
 	s.direction = direction
-	s.velocity = vec
+	s.velocity = vel
 }
 
 // move performs the calculations for the snake's movements
@@ -161,6 +153,7 @@ fn (mut s Snake) grow() {
 			pos.y = head.pos.y
 		}
 	}
+
 	s.body << BodyPart{
 		pos:    pos
 		facing: head.facing
@@ -230,6 +223,7 @@ fn (s Snake) draw() {
 				.right { '>' }
 				.left { '<' }
 			}
+
 			a.termui.set_color(white)
 			a.termui.draw_text(part.pos.x, part.pos.y, text)
 		}
@@ -239,10 +233,7 @@ fn (s Snake) draw() {
 // rat representation
 struct Rat {
 mut:
-	pos      Vec = Vec{
-		x: block_size
-		y: block_size
-	}
+	pos      Vec = Vec{block_size, block_size}
 	captured bool
 	color    termui.Color = grey
 	app      &App         = unsafe { nil }
@@ -250,8 +241,8 @@ mut:
 
 // randomize spawn the rat in a new spot within the playable field
 fn (mut r Rat) randomize() {
-	r.pos.randomize(2 * block_size + buffer, 2 * block_size + buffer, r.app.width - block_size - buffer,
-		r.app.height - block_size - buffer)
+	r.pos.randomize(2 * block_size + buffer, 2 * block_size + buffer, r.app.width - block_size -
+		buffer, r.app.height - block_size - buffer)
 }
 
 @[heap]
@@ -309,6 +300,7 @@ fn event(e &termui.Event, mut app App) {
 				.escape, .q { exit(0) }
 				else { exit(0) }
 			}
+
 			if e.code == .c {
 			} else if e.code == .escape {
 				exit(0)
@@ -316,6 +308,7 @@ fn event(e &termui.Event, mut app App) {
 		}
 		else {}
 	}
+
 	app.redraw = true
 }
 
@@ -366,9 +359,11 @@ fn (mut a App) draw() {
 			a.redraw = true
 		}
 	}
+
 	a.termui.set_color(blue)
 	a.termui.set_bg_color(white)
-	a.termui.draw_text(3 * block_size, a.height - (2 * block_size), 'p - (un)pause r - reset q - quit')
+	a.termui.draw_text(3 * block_size, a.height - (2 * block_size),
+		'p - (un)pause r - reset q - quit')
 	// draw the snake, rat, and score if appropriate
 	if a.redraw {
 		a.termui.set_bg_color(black)
@@ -429,31 +424,38 @@ fn (mut a App) draw_debug() {
 	a.termui.set_color(blue)
 	a.termui.set_bg_color(white)
 	snake := a.snake
-	a.termui.draw_text(block_size, 1 * block_size, 'Display_width: ${a.width:04d} Display_height: ${a.height:04d}')
-	a.termui.draw_text(block_size, 2 * block_size, 'Vx: ${snake.velocity.x:+02d} Vy: ${snake.velocity.y:+02d}')
+	a.termui.draw_text(block_size, 1 * block_size,
+		'Display_width: ${a.width:04d} Display_height: ${a.height:04d}')
+	a.termui.draw_text(block_size, 2 * block_size,
+		'Vx: ${snake.velocity.x:+02d} Vy: ${snake.velocity.y:+02d}')
 	a.termui.draw_text(block_size, 3 * block_size, 'F: ${snake.direction}')
 	snake_head := snake.get_head()
 	rat := a.rat
-	a.termui.draw_text(block_size, 4 * block_size, 'Sx: ${snake_head.pos.x:+03d} Sy: ${snake_head.pos.y:+03d}')
+	a.termui.draw_text(block_size, 4 * block_size,
+		'Sx: ${snake_head.pos.x:+03d} Sy: ${snake_head.pos.y:+03d}')
 	a.termui.draw_text(block_size, 5 * block_size, 'Rx: ${rat.pos.x:+03d} Ry: ${rat.pos.y:+03d}')
 }
 
 fn (mut a App) draw_gameover() {
 	a.termui.set_bg_color(white)
 	a.termui.set_color(red)
-	a.rat.pos = Vec{
-		x: -1
-		y: -1
-	}
+	a.rat.pos = Vec{-1, -1}
 	x_offset := '   #####                        '.len // take half of a line from the game over text and store the length
 	start_x := (a.width / 2) - x_offset
-	a.termui.draw_text(start_x, (a.height / 2) - 3 * block_size, '   #####                         #######                       ')
-	a.termui.draw_text(start_x, (a.height / 2) - 2 * block_size, '  #     #   ##   #    # ######   #     # #    # ###### #####   ')
-	a.termui.draw_text(start_x, (a.height / 2) - 1 * block_size, '  #        #  #  ##  ## #        #     # #    # #      #    #  ')
-	a.termui.draw_text(start_x, (a.height / 2) - 0 * block_size, '  #  #### #    # # ## # #####    #     # #    # #####  #    #  ')
-	a.termui.draw_text(start_x, (a.height / 2) + 1 * block_size, '  #     # ###### #    # #        #     # #    # #      #####   ')
-	a.termui.draw_text(start_x, (a.height / 2) + 2 * block_size, '  #     # #    # #    # #        #     #  #  #  #      #   #   ')
-	a.termui.draw_text(start_x, (a.height / 2) + 3 * block_size, '   #####  #    # #    # ######   #######   ##   ###### #    #  ')
+	a.termui.draw_text(start_x, (a.height / 2) - 3 * block_size,
+		'   #####                         #######                       ')
+	a.termui.draw_text(start_x, (a.height / 2) - 2 * block_size,
+		'  #     #   ##   #    # ######   #     # #    # ###### #####   ')
+	a.termui.draw_text(start_x, (a.height / 2) - 1 * block_size,
+		'  #        #  #  ##  ## #        #     # #    # #      #    #  ')
+	a.termui.draw_text(start_x, (a.height / 2) - 0 * block_size,
+		'  #  #### #    # # ## # #####    #     # #    # #####  #    #  ')
+	a.termui.draw_text(start_x, (a.height / 2) + 1 * block_size,
+		'  #     # ###### #    # #        #     # #    # #      #####   ')
+	a.termui.draw_text(start_x, (a.height / 2) + 2 * block_size,
+		'  #     # #    # #    # #        #     #  #  #  #      #   #   ')
+	a.termui.draw_text(start_x, (a.height / 2) + 3 * block_size,
+		'   #####  #    # #    # ######   #######   ##   ###### #    #  ')
 }
 
 type InitFn = fn (voidptr)

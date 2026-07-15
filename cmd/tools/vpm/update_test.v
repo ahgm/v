@@ -1,3 +1,4 @@
+// vtest build: !musl? && !sanitized_job?
 // vtest retry: 3
 import os
 import rand
@@ -11,6 +12,7 @@ fn testsuite_begin() {
 		eprintln('> skipping ${@FILE}, when `-d network` is missing')
 		exit(0)
 	}
+	dump(test_path)
 	test_utils.set_test_env(test_path)
 }
 
@@ -26,7 +28,7 @@ fn test_update() {
 	res := cmd_ok(@LOCATION, '${v} update')
 	assert res.output.contains('Updating module `pcre`'), res.output
 	assert res.output.contains('Updating module `nedpals.args`'), res.output
-	assert res.output.contains('Updating module `vtray`'), res.output
+	assert res.output.contains('Updating module `spytheman.vtray`'), res.output
 	assert res.output.contains('Skipping download count increment for `nedpals.args`.'), res.output
 	assert res.output.contains('Skipping download count increment for `pcre`.'), res.output
 }
@@ -34,12 +36,12 @@ fn test_update() {
 fn test_update_idents() {
 	mut res := cmd_ok(@LOCATION, '${v} update pcre')
 	assert res.output.contains('Updating module `pcre`'), res.output
-	res = cmd_ok(@LOCATION, '${v} update nedpals.args vtray')
-	assert res.output.contains('Updating module `vtray`'), res.output
+	res = cmd_ok(@LOCATION, '${v} update nedpals.args spytheman.vtray')
+	assert res.output.contains('Updating module `spytheman.vtray`'), res.output
 	assert res.output.contains('Updating module `nedpals.args`'), res.output
 	// Update installed module using its url.
 	res = cmd_ok(@LOCATION, '${v} update https://github.com/spytheman/vtray')
-	assert res.output.contains('Updating module `vtray`'), res.output
+	assert res.output.contains('Updating module `spytheman.vtray`'), res.output
 	// Try update not installed.
 	res = cmd_fail(@LOCATION, '${v} update vsl')
 	assert res.output.contains('failed to find `vsl`'), res.output

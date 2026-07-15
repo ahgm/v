@@ -1,3 +1,5 @@
+@[deprecated: 'If you use it, create a local module named `string_reader`, and copy https://github.com/vlang/v/blob/f24d49259db5d2d7211e79bcf6b6f507d22847f3/vlib/io/string_reader/string_reader.v there.']
+@[deprecated_after: '2026-01-06']
 module string_reader
 
 import io
@@ -38,6 +40,10 @@ pub fn StringReader.new(params StringReaderParams) StringReader {
 	if source := params.source {
 		r.builder = strings.new_builder(source.len)
 		r.builder.write_string(source)
+		if params.reader == none {
+			// There is no upstream reader; only the preloaded buffer can be consumed.
+			r.end_of_stream = true
+		}
 	} else {
 		r.builder = strings.new_builder(params.initial_size)
 	}
@@ -76,13 +82,13 @@ pub fn (mut r StringReader) fill_buffer(read_till_end_of_stream bool) !int {
 	}
 
 	for {
-		read := reader.read(mut r.builder[start..]) or {
+		read := reader.read(mut r.builder[end..]) or {
 			r.end_of_stream = true
 			break
 		}
 		end += read
 
-		if !read_till_end_of_stream && read == 0 {
+		if !read_till_end_of_stream || read == 0 {
 			break
 		} else if r.builder.len == end {
 			unsafe { r.builder.grow_len(io.read_all_grow_len) }
@@ -114,8 +120,12 @@ pub fn (mut r StringReader) fill_buffer_until(n int) !int {
 	}
 
 	mut end := start
+	defer {
+		// shrink the length of the buffer to the total of bytes read
+		r.builder.go_back(r.builder.len - end)
+	}
 	for {
-		read := reader.read(mut r.builder[start..]) or {
+		read := reader.read(mut r.builder[end..]) or {
 			r.end_of_stream = true
 			break
 		}
@@ -124,10 +134,11 @@ pub fn (mut r StringReader) fill_buffer_until(n int) !int {
 		if read == 0 || end - start == n {
 			break
 		} else if r.builder.len == end {
-			if n - end > io.read_all_grow_len {
+			remaining := n - (end - start)
+			if remaining > io.read_all_grow_len {
 				unsafe { r.builder.grow_len(io.read_all_grow_len) }
 			} else {
-				unsafe { r.builder.grow_len(n - end) }
+				unsafe { r.builder.grow_len(remaining) }
 			}
 		}
 	}
@@ -183,18 +194,43 @@ pub fn (mut r StringReader) read_string(n int) !string {
 
 // read implements the Reader interface
 pub fn (mut r StringReader) read(mut buf []u8) !int {
-	start := r.offset
+	if buf.len == 0 {
+		return 0
+	}
 
-	read := r.fill_buffer_until(buf.len - start)!
+	available := r.builder.len - r.offset
+	if available < buf.len && !r.end_of_stream {
+		if r.reader != none {
+			missing := buf.len - available
+			r.fill_buffer_until(missing) or {
+				if err !is io.Eof {
+					return err
+				}
+			}
+		}
+	}
+
+	available_after_fill := r.builder.len - r.offset
+	if available_after_fill == 0 {
+		if r.reader == none && !r.end_of_stream {
+			return error('reader is not set')
+		}
+		return io.Eof{}
+	}
+
+	read := if available_after_fill < buf.len { available_after_fill } else { buf.len }
+	start := r.offset
 	r.offset += read
 
-	copy(mut buf, r.builder[start..read])
-	return r.builder.len - start
+	copy(mut buf, r.builder[start..start + read])
+	return read
 }
 
 // read_line attempts to read a line from the reader.
-// It will read until it finds the specified line delimiter
-// such as (\n, the default or \0) or the end of stream.
+// It reads until it finds the specified delimiter or the end of stream.
+// The returned string does not include the delimiter.
+// When the delimiter is `\n`, a preceding `\r` is treated as part of CRLF
+// and is also omitted from the returned string.
 @[direct_array_access]
 pub fn (mut r StringReader) read_line(config io.BufferedReadLineConfig) !string {
 	if r.end_of_stream && r.needs_fill() {
@@ -220,7 +256,7 @@ pub fn (mut r StringReader) read_line(config io.BufferedReadLineConfig) !string 
 				// great, we hit something
 				// do some checking for whether we hit \r\n or just \n
 				mut x := i
-				if i != 0 && config.delim == `\n` && r.builder[i - 1] == `\r` {
+				if i > start && config.delim == `\n` && r.builder[i - 1] == `\r` {
 					x--
 				}
 				r.offset = i + 1

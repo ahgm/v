@@ -9,6 +9,10 @@ import v.pref
 // mark_used walks the AST, starting at main() and marks all used fns transitively.
 pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&ast.File) {
 	mut all_fns, all_consts, all_globals, all_decltypes, all_structs := all_global_decl(ast_files)
+	mut generic_fns := []&ast.FnDecl{}
+	for file in ast_files {
+		generic_fns << file.generic_fns
+	}
 	util.timing_start('MARKUSED')
 	defer {
 		util.timing_measure('MARKUSED')
@@ -20,7 +24,6 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 	trace_skip_unused_just_unused_fns := pref_.compile_values['trace_skip_unused_just_unused_fns'] == 'true'
 	used_fns := pref_.compile_values['used_fns']
 
-	charptr_idx_str := ast.charptr_type_idx.str()
 	string_idx_str := ast.string_type_idx.str()
 	array_idx_str := ast.array_type_idx.str()
 	map_idx_str := ast.map_type_idx.str()
@@ -50,10 +53,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			println('> used_fn, found matching symbol: ${m}')
 		}
 	}
-	if pref_.backend == .native {
-		// Note: this is temporary, until the native backend supports more features!
-		all_fn_root_names << 'main.main'
-	} else {
+	{
 		mut core_fns := [
 			'main.main',
 		]
@@ -84,6 +84,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 		}
 		if table.used_features.arr_prepend {
 			core_fns << ref_array_idx_str + '.prepend_many'
+			core_fns << ref_array_idx_str + '.prepend_noscan'
 		}
 		if table.used_features.arr_reverse {
 			core_fns << array_idx_str + '.reverse'
@@ -112,10 +113,13 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			core_fns << '_result_ok'
 		}
 		if table.used_features.anon_fn {
-			core_fns << 'memdup_uncollectable'
+			core_fns << 'memdup'
 			core_fns << 'builtin.closure.closure_alloc'
 			core_fns << 'builtin.closure.closure_init'
 			core_fns << 'builtin.closure.closure_create'
+			core_fns << 'builtin.closure.closure_create_with_data'
+			core_fns << 'builtin.closure.closure_data'
+			core_fns << 'builtin.closure.closure_try_destroy'
 		}
 		if table.used_features.arr_map {
 			include_panic_deps = true
@@ -125,12 +129,8 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			core_fns << ref_densearray_idx_str + '.clone'
 			core_fns << map_idx_str + '.clone'
 		}
-		if table.used_features.type_name {
-			core_fns << charptr_idx_str + '.vstring_literal'
-		}
 		if pref_.trace_calls || pref_.trace_fns.len > 0 {
 			include_panic_deps = true
-			core_fns << 'vgettid'
 			core_fns << 'C.gettid'
 			core_fns << 'v.trace_calls.on_c_main'
 			core_fns << 'v.trace_calls.current_time'
@@ -146,6 +146,14 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 		if pref_.should_use_segfault_handler() {
 			core_fns << 'v_segmentation_fault_handler'
 		}
+		if pref_.is_check_overflow {
+			// add all fns in `builtin/overflow/overflow.v`
+			for op in ['add', 'sub', 'mul'] {
+				for typ in ['i8', 'u8', 'i16', 'u16', 'i32', 'u32', 'i64', 'u64'] {
+					core_fns << 'builtin.overflow.${op}_${typ}'
+				}
+			}
+		}
 		all_fn_root_names << core_fns
 	}
 	if pref_.is_bare {
@@ -159,7 +167,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 		]
 	}
 
-	is_noscan_whitelisted := pref_.gc_mode in [.boehm_full_opt, .boehm_incr_opt]
+	is_noscan_whitelisted := pref_.gc_mode in [.boehm_full_opt, .boehm_incr_opt, .vgc]
 
 	has_noscan := all_fn_root_names.any(it.contains('noscan')
 		&& it !in ['vcalloc_noscan', 'malloc_noscan'])
@@ -177,7 +185,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 			all_fn_root_names << k
 			continue
 		}
-		// _noscan functions/methods are selected when the `-gc boehm` is on:
+		// _noscan functions/methods are selected when the active GC can honor noscan allocations.
 		if has_noscan && is_noscan_whitelisted && mfn.name.ends_with('_noscan') {
 			all_fn_root_names << k
 			continue
@@ -208,7 +216,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 		}
 
 		if k.ends_with('before_request') {
-			// TODO: add a more specific check for the .before_request() method in vweb apps
+			// TODO: add a more specific check for the .before_request() method in veb apps
 			all_fn_root_names << k
 			continue
 		}
@@ -233,8 +241,9 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 	// handle assertions and testing framework callbacks:
 	if pref_.is_debug {
 		all_fn_root_names << 'panic_debug'
-		all_fn_root_names << 'tos3'
 	}
+	// tos3 is used by cgen for typeof() on sum_types at runtime:
+	all_fn_root_names << 'tos3'
 	if pref_.is_test {
 		all_fn_root_names << 'main.cb_assertion_ok'
 		all_fn_root_names << 'main.cb_assertion_failed'
@@ -247,9 +256,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 		}
 	}
 
-	handle_vweb(mut table, mut all_fn_root_names, 'veb.Result', 'veb.filter', 'veb.Context')
-	handle_vweb(mut table, mut all_fn_root_names, 'vweb.Result', 'vweb.filter', 'vweb.Context')
-	handle_vweb(mut table, mut all_fn_root_names, 'x.vweb.Result', 'x.vweb.filter', 'x.vweb.Context')
+	handle_veb(mut table, mut all_fn_root_names, 'veb.Result', 'veb.filter', 'veb.Context')
 
 	if 'debug_used_features' in pref_.compile_defines {
 		eprintln('> debug_used_features: ${table.used_features}')
@@ -258,6 +265,7 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 	mut walker := Walker.new(
 		table:         table
 		all_fns:       all_fns
+		generic_fns:   generic_fns
 		all_consts:    all_consts
 		all_globals:   all_globals
 		all_decltypes: all_decltypes
@@ -277,9 +285,32 @@ pub fn mark_used(mut table ast.Table, mut pref_ pref.Preferences, ast_files []&a
 	}
 
 	walker.mark_root_fns(all_fn_root_names)
+	walker.mark_generic_fn_instances()
 
-	walker.mark_by_sym_name('vweb.RedirectParams')
-	walker.mark_by_sym_name('vweb.RequestParams')
+	// Mark all concrete generic type instances as used. These are created by
+	// generic_insts_to_concrete() and unwrap_generic_type_ex() for specific
+	// type instantiations. The walker may not mark them because it visits
+	// generic function bodies with unresolved (generic) AST types.
+	for sym in table.type_symbols {
+		if sym.info is ast.Struct && sym.info.concrete_types.len > 0 && !sym.info.is_generic {
+			walker.mark_by_sym(sym)
+		} else if sym.info is ast.SumType && sym.info.concrete_types.len > 0 && !sym.info.is_generic {
+			walker.mark_by_sym(sym)
+		} else if sym.info is ast.Interface && sym.info.concrete_types.len > 0
+			&& !sym.info.is_generic {
+			walker.mark_by_sym(sym)
+		} else if sym.info is ast.GenericInst && sym.info.parent_idx > 0
+			&& !sym.info.concrete_types.any(it.has_flag(.generic)) {
+			walker.mark_by_sym(sym)
+		} else if sym.info is ast.Thread && sym.info.return_type != ast.void_type {
+			walker.mark_by_sym(sym)
+		} else if sym.info is ast.Array {
+			elem_sym := table.sym(sym.info.elem_type)
+			if elem_sym.info is ast.Thread && elem_sym.info.return_type != ast.void_type {
+				walker.mark_by_sym(sym)
+			}
+		}
+	}
 
 	for kcon, con in all_consts {
 		if pref_.is_shared && con.is_pub {
@@ -366,9 +397,8 @@ fn all_global_decl_in_stmts(stmts []ast.Stmt, mut all_fns map[string]ast.FnDecl,
 						if node.expr.is_comptime {
 							// top level comptime $if
 							for branch in node.expr.branches {
-								all_global_decl_in_stmts(branch.stmts, mut all_fns, mut
-									all_consts, mut all_globals, mut all_decltypes, mut
-									all_structs)
+								all_global_decl_in_stmts(branch.stmts, mut all_fns, mut all_consts, mut
+									all_globals, mut all_decltypes, mut all_structs)
 							}
 						}
 					}
@@ -376,9 +406,8 @@ fn all_global_decl_in_stmts(stmts []ast.Stmt, mut all_fns map[string]ast.FnDecl,
 						if node.expr.is_comptime {
 							// top level comptime $match
 							for branch in node.expr.branches {
-								all_global_decl_in_stmts(branch.stmts, mut all_fns, mut
-									all_consts, mut all_globals, mut all_decltypes, mut
-									all_structs)
+								all_global_decl_in_stmts(branch.stmts, mut all_fns, mut all_consts, mut
+									all_globals, mut all_decltypes, mut all_structs)
 							}
 						}
 					}
@@ -401,8 +430,8 @@ fn all_global_decl(ast_files []&ast.File) (map[string]ast.FnDecl, map[string]ast
 	mut all_decltypes := map[string]ast.TypeDecl{}
 	mut all_structs := map[string]ast.StructDecl{}
 	for i in 0 .. ast_files.len {
-		all_global_decl_in_stmts(ast_files[i].stmts, mut all_fns, mut all_consts, mut
-			all_globals, mut all_decltypes, mut all_structs)
+		all_global_decl_in_stmts(ast_files[i].stmts, mut all_fns, mut all_consts, mut all_globals, mut
+			all_decltypes, mut all_structs)
 	}
 	return all_fns, all_consts, all_globals, all_decltypes, all_structs
 }
@@ -415,16 +444,16 @@ fn mark_all_methods_used(mut table ast.Table, mut all_fn_root_names []string, ty
 	}
 }
 
-fn handle_vweb(mut table ast.Table, mut all_fn_root_names []string, result_name string, filter_name string,
+fn handle_veb(mut table ast.Table, mut all_fn_root_names []string, result_name string, filter_name string,
 	context_name string) {
-	// handle vweb magic router methods:
+	// handle veb magic router methods:
 	result_type_idx := table.find_type(result_name)
 	if result_type_idx == 0 {
 		return
 	}
 	all_fn_root_names << filter_name
-	typ_vweb_context := table.find_type(context_name).set_nr_muls(1)
-	mark_all_methods_used(mut table, mut all_fn_root_names, typ_vweb_context)
+	typ_veb_context := table.find_type(context_name).set_nr_muls(1)
+	mark_all_methods_used(mut table, mut all_fn_root_names, typ_veb_context)
 	for vgt in table.used_features.used_veb_types {
 		sym_app := table.sym(vgt)
 		pvgt := int(vgt.set_nr_muls(1)).str()
@@ -440,7 +469,7 @@ fn handle_vweb(mut table ast.Table, mut all_fn_root_names []string, result_name 
 			if skip {
 				continue
 			}
-			// eprintln('vgt: $vgt | pvgt: $pvgt | sym_app.name: $sym_app.name | m.name: $m.name')
+			// eprintln('vgt: ${vgt} | pvgt: ${pvgt} | sym_app.name: ${sym_app.name} | m.name: ${m.name}')
 			all_fn_root_names << pvgt + '.' + m.name
 		}
 	}

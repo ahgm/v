@@ -8,7 +8,6 @@ import v.pref
 import v.util
 import v.token
 import v.errors
-import v.eval
 import v.gen.wasm.serialise
 import wasm
 import os
@@ -23,7 +22,6 @@ mut:
 	warnings  []errors.Warning
 	errors    []errors.Error
 	table     &ast.Table = unsafe { nil }
-	eval      eval.Eval
 	enum_vals map[string]Enum
 
 	mod                    wasm.Module
@@ -48,6 +46,26 @@ mut:
 	needs_address          bool
 	defer_vars             []Var
 	is_direct_array_access bool // inside a `[direct_array_access]` function
+	// function values: fn name -> slot in the `__indirect_function_table`.
+	// Single owner of the indirect-call table population (reused by later phases).
+	fn_value_indices   map[string]int
+	pending_anon_fns   []ast.FnDecl    // non-capturing anon fns to compile after toplevel stmts
+	compiled_anon_fns  map[string]bool // dedup for pending_anon_fns
+	uses_call_indirect bool            // a `call_indirect` was emitted, so the table must exist
+}
+
+// fn_table_index returns the slot of `name` in the indirect function table,
+// registering it (and growing the table) on first use.
+pub fn (mut g Gen) fn_table_index(name string) int {
+	if idx := g.fn_value_indices[name] {
+		return idx
+	}
+	// Slot 0 is reserved as the null/trap slot, so a real function value never
+	// collides with `unsafe { nil }` (which also lowers to `i32.const 0`). Real
+	// functions therefore start at index 1.
+	idx := g.fn_value_indices.len + 1
+	g.fn_value_indices[name] = idx
+	return idx
 }
 
 struct Global {
@@ -74,7 +92,7 @@ pub fn (mut g Gen) v_error(s string, pos token.Pos) {
 		g.errors << errors.Error{
 			file_path: g.file_path
 			pos: pos
-			reporter: .gen			
+			reporter: .gen
 			message: s
 		}
 	}
@@ -245,6 +263,17 @@ pub fn (mut g Gen) fn_decl(node ast.FnDecl) {
 		}
 		else {
 			if rt.idx() != ast.void_type_idx {
+				// A scalar `?T`/`!T` return reaches here (it is not a MultiReturn),
+				// so the option/result guards below — which only run inside the
+				// MultiReturn arm or after the match — are dead for it. Guard before
+				// `get_wasm_type`, which would otherwise abort with an internal
+				// "unreachable type" ICE on the option/result-wrapped type.
+				if rt.has_flag(.option) {
+					g.v_error('option types are not implemented', node.return_type_pos)
+				}
+				if rt.has_flag(.result) {
+					g.v_error('result types are not implemented', node.return_type_pos)
+				}
 				wtyp := g.get_wasm_type(rt)
 				if g.is_param_type(rt) {
 					paramdbg << g.dbg_type_name('__rval(0)', rt)
@@ -262,6 +291,7 @@ pub fn (mut g Gen) fn_decl(node ast.FnDecl) {
 			}
 		}
 	}
+
 	if rt.has_flag(.result) {
 		g.v_error('result types are not implemented', node.return_type_pos)
 		retl << .i32_t // &IError
@@ -286,7 +316,7 @@ pub fn (mut g Gen) fn_decl(node ast.FnDecl) {
 	g.fn_local_idx_end = (g.local_vars.len + g.ret_rvars.len)
 	g.fn_name = name
 
-	mut should_export := g.pref.os == .browser && node.is_pub && node.mod == 'main'
+	mut should_export := g.pref.os in [.browser, .wasi] && node.is_pub && node.mod == 'main'
 
 	g.func = g.mod.new_debug_function(name, wasm.FuncType{paraml, retl, none}, paramdbg)
 	func_start := g.func.patch_pos()
@@ -411,6 +441,111 @@ pub fn (mut g Gen) handle_ptr_arithmetic(typ ast.Type) {
 	}
 }
 
+fn (mut g Gen) handle_string_operation(op token.Kind) {
+	left_tmp := g.func.new_local_named(.i32_t, '__tmp<string>.left')
+	right_tmp := g.func.new_local_named(.i32_t, '__tmp<string>.right')
+	g.func.local_set(right_tmp)
+	g.func.local_set(left_tmp)
+
+	match op {
+		.plus {
+			ret_var := g.new_local('', ast.string_type)
+			g.ref(ret_var)
+			g.func.local_get(left_tmp)
+			g.func.local_get(right_tmp)
+			g.func.call('string.+')
+			g.get(ret_var)
+		}
+		.eq {
+			g.func.local_get(left_tmp)
+			g.func.local_get(right_tmp)
+			g.func.call('string.==')
+		}
+		.ne {
+			g.func.local_get(left_tmp)
+			g.func.local_get(right_tmp)
+			g.func.call('string.==')
+			g.func.eqz(.i32_t)
+		}
+		.lt {
+			g.func.local_get(left_tmp)
+			g.func.local_get(right_tmp)
+			g.func.call('string.<')
+		}
+		.gt {
+			g.func.local_get(right_tmp)
+			g.func.local_get(left_tmp)
+			g.func.call('string.<')
+		}
+		.le {
+			g.func.local_get(right_tmp)
+			g.func.local_get(left_tmp)
+			g.func.call('string.<')
+			g.func.eqz(.i32_t)
+		}
+		.ge {
+			g.func.local_get(left_tmp)
+			g.func.local_get(right_tmp)
+			g.func.call('string.<')
+			g.func.eqz(.i32_t)
+		}
+		else {
+			g.w_error('unsupported string operation: `${op}`')
+		}
+	}
+}
+
+pub fn (mut g Gen) string_inter_literal_expr(node ast.StringInterLiteral, expected ast.Type) {
+	if node.exprs.len == 0 {
+		g.expr(ast.StringLiteral{ val: node.vals[0], pos: node.pos }, expected)
+		return
+	}
+
+	result_var := g.new_local('__str_inter', ast.string_type)
+
+	g.set_with_expr(ast.StringLiteral{ val: node.vals[0], pos: node.pos }, result_var)
+
+	for i, expr in node.exprs {
+		mut expr_to_concat := expr
+		typ := node.expr_types[i]
+
+		if typ != ast.string_type {
+			has_str, _, _ := g.table.sym(typ).str_method_info()
+			if !has_str {
+				g.v_error('cannot interpolate type without .str() method', node.fmt_poss[i])
+			}
+
+			expr_to_concat = ast.CallExpr{
+				name:           'str'
+				left:           expr
+				left_type:      typ
+				receiver_type:  typ
+				return_type:    ast.string_type
+				is_method:      true
+				is_return_used: true
+			}
+		}
+
+		// result = result + expr_as_string
+		{
+			g.get(result_var)
+			g.expr(expr_to_concat, ast.string_type)
+			g.handle_string_operation(.plus)
+			g.set(result_var)
+		}
+
+		// Concat the next string segment (if not empty)
+		if i + 1 < node.vals.len && node.vals[i + 1].len > 0 {
+			g.get(result_var)
+			g.expr(ast.StringLiteral{ val: node.vals[i + 1], pos: node.pos }, ast.string_type)
+			g.handle_string_operation(.plus)
+			g.set(result_var)
+		}
+	}
+
+	g.get(result_var)
+}
+
 pub fn (mut g Gen) infix_expr(node ast.InfixExpr, expected ast.Type) {
 	if node.op in [.logical_or, .and] {
 		temp := g.func.new_local_named(.i32_t, '__tmp<bool>')
@@ -446,12 +581,9 @@ pub fn (mut g Gen) infix_expr(node ast.InfixExpr, expected ast.Type) {
 	}
 	g.infix_from_typ(node.left_type, node.op)
 
-	res_typ := if node.op in [.eq, .ne, .gt, .lt, .ge, .le] {
-		ast.bool_type
-	} else {
-		node.left_type
-	}
-	g.func.cast(g.as_numtype(g.get_wasm_type(res_typ)), res_typ.is_signed(), g.as_numtype(g.get_wasm_type(expected)))
+	res_typ := if node.op in [.eq, .ne, .gt, .lt, .ge, .le] { ast.bool_type } else { node.left_type }
+	g.func.cast(g.as_numtype(g.get_wasm_type(res_typ)), res_typ.is_signed(),
+		g.as_numtype(g.get_wasm_type(expected)))
 }
 
 pub fn (mut g Gen) prefix_expr(node ast.PrefixExpr, expected ast.Type) {
@@ -553,9 +685,202 @@ pub fn (mut g Gen) if_expr(ifexpr ast.IfExpr, expected ast.Type, existing_rvars 
 	g.if_branch(ifexpr, expected, params, 0, existing_rvars)
 }
 
+pub fn (mut g Gen) match_expr(node ast.MatchExpr, expected ast.Type, existing_rvars []Var) {
+	results := if expected == ast.void_type {
+		[]wasm.ValType{}
+	} else if existing_rvars.len == 0 {
+		g.unpack_type(expected).map(g.get_wasm_type(it))
+	} else {
+		g.unpack_type(expected).filter(!g.is_param_type(it)).map(g.get_wasm_type(it))
+	}
+	g.match_branch(node, expected, results, 0, existing_rvars)
+}
+
+fn (mut g Gen) match_branch(node ast.MatchExpr, expected ast.Type, unpacked_params []wasm.ValType, branch_idx int, existing_rvars []Var) {
+	if branch_idx >= node.branches.len {
+		return
+	}
+
+	branch := node.branches[branch_idx]
+	mut is_last_branch := branch_idx + 1 >= node.branches.len
+	mut has_else := branch.is_else
+
+	if has_else {
+		if branch.stmts.len > 0 {
+			g.rvar_expr_stmts(branch.stmts, expected, existing_rvars)
+		}
+		return
+	}
+
+	if branch.exprs.len > 0 {
+		g.match_branch_exprs(node, expected, unpacked_params, branch_idx, 0, existing_rvars, branch)
+	} else {
+		if branch.stmts.len > 0 {
+			g.rvar_expr_stmts(branch.stmts, expected, existing_rvars)
+		}
+		if !is_last_branch {
+			g.match_branch(node, expected, unpacked_params, branch_idx + 1, existing_rvars)
+		}
+	}
+}
+
+fn (mut g Gen) match_branch_exprs(node ast.MatchExpr, expected ast.Type, unpacked_params []wasm.ValType, branch_idx int, expr_idx int, existing_rvars []Var, branch ast.MatchBranch) {
+	if expr_idx >= branch.exprs.len {
+		return
+	}
+
+	mut is_last_branch := branch_idx + 1 >= node.branches.len
+	mut is_last_expr := expr_idx + 1 >= branch.exprs.len
+
+	expr := branch.exprs[expr_idx]
+
+	if expr is ast.RangeExpr {
+		wasm_type := g.as_numtype(g.get_wasm_type(node.cond_type))
+		is_signed := node.cond_type.is_signed()
+
+		g.expr(node.cond, node.cond_type)
+		g.expr(expr.high, node.cond_type)
+		g.func.le(wasm_type, is_signed)
+	} else {
+		if g.is_param_type(node.cond_type) {
+			// Param types -> strings etc
+			g.expr(node.cond, node.cond_type)
+			g.expr(expr, node.cond_type)
+			g.infix_from_typ(node.cond_type, .eq)
+		} else {
+			// Numeric types -> direct comparison
+			wasm_type := g.as_numtype(g.get_wasm_type(node.cond_type))
+			g.expr(node.cond, node.cond_type)
+			g.expr(expr, node.cond_type)
+			g.func.eq(wasm_type)
+		}
+	}
+
+	blk := g.func.c_if([], unpacked_params)
+	{
+		if branch.stmts.len > 0 {
+			g.rvar_expr_stmts(branch.stmts, expected, existing_rvars)
+		}
+	}
+	{
+		g.func.c_else(blk)
+		if is_last_expr {
+			if !is_last_branch {
+				g.match_branch(node, expected, unpacked_params, branch_idx + 1, existing_rvars)
+			}
+		} else {
+			g.match_branch_exprs(node, expected, unpacked_params, branch_idx, expr_idx + 1,
+				existing_rvars, branch)
+		}
+	}
+	g.func.c_end(blk)
+}
+
+// fn_value_functype lowers a V function type into the wasm function type used
+// by `call_indirect`. It mirrors the parameter/return lowering done in `fn_decl`
+// (a non-pure return becomes a leading rvar pointer parameter), so the computed
+// type index matches the type the target function was committed with.
+fn (mut g Gen) fn_value_functype(fn_typ ast.Type) wasm.FuncType {
+	// final_sym unwraps any alias layer (e.g. `type Callback = fn (int) int`)
+	ts := g.table.final_sym(fn_typ)
+	if ts.info !is ast.FnType {
+		g.w_error('fn_value_functype: `${ts.name}` is not a function type')
+	}
+	func := (ts.info as ast.FnType).func
+
+	mut paraml := []wasm.ValType{}
+	mut retl := []wasm.ValType{}
+
+	rt := func.return_type
+	if g.table.sym(rt).info is ast.MultiReturn {
+		g.w_error('wasm backend: calling a function value with multiple return values is not yet supported')
+	}
+	if rt.has_flag(.option) || rt.has_flag(.result) {
+		g.w_error('wasm backend: option/result function values are not yet supported')
+	}
+	if rt.idx() != ast.void_type_idx {
+		wtyp := g.get_wasm_type(rt)
+		if g.is_param_type(rt) {
+			paraml << wtyp // non-pure return -> leading rvar pointer (i32)
+		} else {
+			retl << wtyp
+		}
+	}
+	for p in func.params {
+		paraml << g.get_wasm_type_int_literal(p.typ)
+	}
+
+	return wasm.FuncType{paraml, retl, none}
+}
+
+// push_fn_value evaluates the callee of a function-value call and leaves its
+// i32 index into the indirect function table on the stack.
+fn (mut g Gen) push_fn_value(node ast.CallExpr, fn_typ ast.Type) {
+	if node.is_method {
+		// a fn-typed struct field, e.g. `b.op` in `b.op(x)`: load the field
+		g.expr(ast.SelectorExpr{
+			expr:       node.left
+			field_name: node.name
+			expr_type:  node.left_type
+			typ:        fn_typ
+		}, fn_typ)
+	} else if node.name == '' {
+		// the callee is the expression itself, e.g. `(expr)(x)` or `make_cb()(x)`
+		g.expr(node.left, fn_typ)
+	} else if node.is_fn_a_const {
+		// a const of function type. The const is registered in the global scope
+		// under its fully-qualified name (`node.const_name`, e.g. `main.cb`), not
+		// the lexical call name, so a plain `scope.find(node.name)` misses it.
+		obj := g.table.global_scope.find(node.const_name) or {
+			g.w_error('wasm: cannot resolve function const `${node.const_name}`')
+		}
+		v := g.get_var_from_ident(ast.Ident{
+			name:  node.const_name
+			scope: node.scope
+			obj:   obj
+		})
+		g.get(v)
+	} else {
+		// a named local/param variable of function type
+		obj := node.scope.find(node.name) or {
+			g.w_error('wasm: cannot resolve function value `${node.name}`')
+		}
+		v := g.get_var_from_ident(ast.Ident{
+			name:  node.name
+			scope: node.scope
+			obj:   obj
+		})
+		g.get(v)
+	}
+}
+
 pub fn (mut g Gen) call_expr(node ast.CallExpr, expected ast.Type, existing_rvars []Var) {
 	mut wasm_ns := ?string(none)
 	mut name := node.name
+
+	// Detect a call to a function value: either a fn-typed local/param/const
+	// (is_fn_var/is_fn_a_const), a fn-typed struct field, which the checker
+	// represents as a method call (`b.op()`), or an expression callee that
+	// evaluates to a function (`make_cb()(x)`, `(expr)(x)`), which the checker
+	// leaves with an empty name and a fn-typed `left_type`.
+	mut is_fn_value := false
+	mut fn_value_typ := ast.void_type
+	if node.is_fn_var || node.is_fn_a_const {
+		is_fn_value = true
+		fn_value_typ = node.fn_var_type
+	} else if node.is_method && node.left_type != 0 {
+		if field := g.table.find_field(g.table.sym(node.left_type), node.name) {
+			if g.table.final_sym(field.typ).info is ast.FnType {
+				is_fn_value = true
+				fn_value_typ = field.typ
+			}
+		}
+	} else if node.name == '' && node.left_type != 0 {
+		if g.table.final_sym(node.left_type).info is ast.FnType {
+			is_fn_value = true
+			fn_value_typ = node.left_type
+		}
+	}
 
 	is_print := name in ['panic', 'println', 'print', 'eprintln', 'eprint']
 
@@ -600,21 +925,33 @@ pub fn (mut g Gen) call_expr(node ast.CallExpr, expected ast.Type, existing_rvar
 
 	// {method self}
 	//
-	if node.is_method {
-		expr := if !node.left_type.is_ptr() && node.receiver_type.is_ptr() {
-			ast.Expr(ast.PrefixExpr{
+	if node.is_method && !is_fn_value {
+		expr := if !node.left_type.is_ptr() && node.receiver_type.is_ptr() { ast.Expr(ast.PrefixExpr{
 				op:    .amp
 				right: node.left
-			})
-		} else {
-			node.left
-		}
+			}) } else { node.left }
 		// hack alert!
 		if node.receiver_type == ast.int_literal_type && expr is ast.IntegerLiteral {
 			g.literal(expr.val, ast.i64_type)
 		} else {
 			g.expr(expr, node.receiver_type)
 		}
+	}
+
+	// {callee}
+	//
+	// Evaluate the callee of a function-value call *before* its arguments, so a
+	// callee with side effects (e.g. `make_box().op(next())`) keeps V's
+	// left-to-right evaluation order. `call_indirect` wants the table index on
+	// top of the stack (after the args), so stash it in a temp and reload it
+	// once the arguments are in place.
+	mut fn_value_idx := Var{}
+	if is_fn_value {
+		g.is_leaf_function = false
+		g.uses_call_indirect = true
+		fn_value_idx = g.new_local('', fn_value_typ)
+		g.push_fn_value(node, fn_value_typ)
+		g.set(fn_value_idx)
 	}
 
 	// {arguments}
@@ -649,7 +986,13 @@ pub fn (mut g Gen) call_expr(node ast.CallExpr, expected ast.Type, existing_rvar
 		}
 	}
 
-	if namespace := wasm_ns {
+	if is_fn_value {
+		// args are already on the stack; reload the callee's table index (computed
+		// before the args, above) on top, then dispatch through the indirect table
+		typeidx := g.mod.new_functype(g.fn_value_functype(fn_value_typ))
+		g.get(fn_value_idx)
+		g.func.call_indirect(typeidx, 0)
+	} else if namespace := wasm_ns {
 		// import calls won't touch `__vsp` !
 
 		g.func.call_import(namespace, name)
@@ -769,7 +1112,10 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 
 			size, _ := g.pool.type_size(typ)
 
+			old_needs_address := g.needs_address
+			g.needs_address = false
 			g.expr(node.index, ast.int_type)
+			g.needs_address = old_needs_address
 
 			if !direct_array_access {
 				g.is_leaf_function = false // calls panic()
@@ -825,7 +1171,13 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 			g.get(v)
 		}
 		ast.SelectorExpr {
-			if v := g.get_var_from_expr(node) {
+			final := g.table.final_sym(node.expr_type)
+			if node.field_name == 'len' && final.info is ast.ArrayFixed {
+				// a fixed array's `.len` is a compile-time constant; the checker
+				// types it as `int` but emits no field, so resolve it here rather
+				// than aborting in get_field_offset ("could not find field len").
+				g.func.i32_const(i32(final.info.size))
+			} else if v := g.get_var_from_expr(node) {
 				if g.needs_address {
 					if !v.is_address {
 						g.v_error("cannot take the address of a value that doesn't live on the stack. this is a current limitation.",
@@ -850,7 +1202,7 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 			g.cast(node.typ, expected)
 		}
 		ast.MatchExpr {
-			g.w_error('wasm backend does not support match expressions yet')
+			g.match_expr(node, expected, [])
 		}
 		ast.EnumVal {
 			type_name := g.table.get_type_name(node.typ)
@@ -858,8 +1210,8 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 			g.literalint(g.enum_vals[type_name].fields[node.val], ts_type)
 		}
 		ast.OffsetOf {
-			styp := g.table.sym(node.struct_type)
-			if styp.kind != .struct {
+			sym := g.table.sym(node.struct_type)
+			if sym.kind != .struct {
 				g.v_error('__offsetof expects a struct Type as first argument', node.pos)
 			}
 			off := g.get_field_offset(node.struct_type, node.field)
@@ -889,6 +1241,9 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 			g.set_with_expr(node, v)
 			g.get(v)
 		}
+		ast.StringInterLiteral {
+			g.string_inter_literal_expr(node, expected)
+		}
 		ast.InfixExpr {
 			g.infix_expr(node, expected)
 		}
@@ -909,13 +1264,19 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 			g.set_set(v)
 		}
 		ast.CharLiteral {
-			rns := serialise.eval_escape_codes_raw(node.val) or { panic('unreachable') }.runes()[0]
+			rns := ast.char_literal_rune_value(node.val) or { panic('unreachable') }
 			g.func.i32_const(i32(rns))
 		}
 		ast.Ident {
-			v := g.get_var_from_ident(node)
-			g.get(v)
-			g.cast(v.typ, expected)
+			if node.kind == .function {
+				// a function used as a value: push its index into the
+				// indirect function table (an i32)
+				g.func.i32_const(i32(g.fn_table_index(node.name)))
+			} else {
+				v := g.get_var_from_ident(node)
+				g.get(v)
+				g.cast(v.typ, expected)
+			}
 		}
 		ast.IntegerLiteral, ast.FloatLiteral {
 			g.literal(node.val, expected)
@@ -923,6 +1284,7 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 		ast.Nil {
 			g.func.i32_const(0)
 		}
+		ast.EmptyExpr {}
 		ast.IfExpr {
 			g.if_expr(node, expected, [])
 		}
@@ -935,6 +1297,15 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 
 			g.expr(node.expr, node.expr_type)
 
+			// A cast involving a function value (e.g. `type Alias = fn (...)`) is an
+			// i32 table index on both sides, so the value passes through unchanged.
+			// Return before the numeric-cast path, which would also mis-handle a
+			// function callee (`Alias(some_fn)`) as a variable in get_var_from_ident.
+			if g.table.final_sym(node.typ).info is ast.FnType
+				|| g.table.final_sym(node.expr_type).info is ast.FnType {
+				return
+			}
+
 			// TODO: unbelievable colossal hack
 			mut typ := node.expr_type
 			if node.expr is ast.Ident {
@@ -944,10 +1315,27 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 				}
 			}
 
-			g.func.cast(g.as_numtype(g.get_wasm_type(typ)), typ.is_signed(), g.as_numtype(g.get_wasm_type(node.typ)))
+			g.func.cast(g.as_numtype(g.get_wasm_type(typ)), typ.is_signed(),
+				g.as_numtype(g.get_wasm_type(node.typ)))
 		}
 		ast.CallExpr {
 			g.call_expr(node, expected, [])
+		}
+		ast.AnonFn {
+			if node.inherited_vars.len > 0 {
+				// closures lower to runtime-generated executable memory, which
+				// WebAssembly does not support efficiently yet; reject for now.
+				g.v_error('closures (capturing anonymous functions) are not yet supported on the `wasm` backend',
+					node.decl.pos)
+			}
+			// compile the anon fn after the current toplevel stmts (when the
+			// per-function state is clean again), then push its table index
+			idx := g.fn_table_index(node.decl.name)
+			if node.decl.name !in g.compiled_anon_fns {
+				g.compiled_anon_fns[node.decl.name] = true
+				g.pending_anon_fns << node.decl
+			}
+			g.func.i32_const(i32(idx))
 		}
 		else {
 			g.w_error('wasm.expr(): unhandled node: ' + node.type_name())
@@ -955,8 +1343,205 @@ pub fn (mut g Gen) expr(node ast.Expr, expected ast.Type) {
 	}
 }
 
+pub fn (mut g Gen) for_in_stmt(node ast.ForInStmt) {
+	if node.is_range {
+		g.for_in_range(node)
+		return
+	}
+
+	cond_sym := g.table.sym(node.cond_type)
+
+	match cond_sym.kind {
+		.array_fixed {
+			g.for_in_array_fixed(node, cond_sym)
+		}
+		.string {
+			g.for_in_string(node)
+		}
+		else {
+			g.w_error('unsupported iter type: ${cond_sym.kind}')
+		}
+	}
+}
+
+fn (mut g Gen) for_in_range(node ast.ForInStmt) {
+	loop_var_type := unpack_literal_int(node.val_type)
+	block := g.func.c_block([], [])
+	{
+		mut loop_var := Var{}
+		loop_var = g.new_local(node.val_var, loop_var_type)
+
+		g.expr(node.cond, loop_var_type)
+		g.set(loop_var)
+
+		loop := g.func.c_loop([], [])
+		{
+			g.loop_breakpoint_stack << LoopBreakpoint{
+				c_continue: loop
+				c_break:    block
+				name:       node.label
+			}
+
+			g.get(loop_var)
+			g.expr(node.high, loop_var_type)
+			wtyp := g.as_numtype(g.get_wasm_type(loop_var_type))
+			g.func.lt(wtyp, loop_var_type.is_signed())
+			g.func.eqz(.i32_t)
+			g.func.c_br_if(block)
+
+			g.expr_stmts(node.stmts, ast.void_type)
+
+			g.set_prepare(loop_var)
+			{
+				g.get(loop_var)
+				g.literalint(1, loop_var_type)
+				g.func.add(wtyp)
+			}
+			g.set(loop_var)
+
+			g.func.c_br(loop)
+			g.loop_breakpoint_stack.pop()
+		}
+		g.func.c_end(loop)
+	}
+	g.func.c_end(block)
+}
+
+fn (mut g Gen) for_in_array_fixed(node ast.ForInStmt, cond_sym &ast.TypeSymbol) {
+	info := cond_sym.info as ast.ArrayFixed
+	array_size := info.size
+
+	block := g.func.c_block([], [])
+	{
+		idx_var := g.new_local('__idx', ast.int_type)
+		g.literalint(0, ast.int_type)
+		g.set(idx_var)
+
+		array_base := g.new_local('__array_base', node.cond_type)
+		g.expr(node.cond, node.cond_type)
+		g.set(array_base)
+
+		loop := g.func.c_loop([], [])
+		{
+			g.loop_breakpoint_stack << LoopBreakpoint{
+				c_continue: loop
+				c_break:    block
+				name:       node.label
+			}
+
+			// if index >= array_size
+			g.get(idx_var)
+			g.literalint(array_size, ast.int_type)
+			g.func.ge(.i32_t, false)
+			g.func.c_br_if(block)
+
+			// _ -> No variable in the loop
+			if node.val_var != '_' {
+				element_var := g.new_local(node.val_var, node.val_type)
+
+				// array_base + idx * element_size
+				g.get(array_base)
+				g.get(idx_var)
+
+				elem_size, _ := g.pool.type_size(node.val_type)
+				if elem_size > 1 {
+					g.literalint(elem_size, ast.int_type)
+					g.func.mul(.i32_t)
+				}
+				g.func.add(.i32_t)
+
+				if g.is_pure_type(node.val_type) {
+					g.load(node.val_type, 0)
+				}
+
+				g.set(element_var)
+			}
+
+			// Inside loop
+			g.expr_stmts(node.stmts, ast.void_type)
+
+			// idx++
+			g.set_prepare(idx_var)
+			{
+				g.get(idx_var)
+				g.literalint(1, ast.int_type)
+				g.func.add(.i32_t)
+			}
+			g.set(idx_var)
+
+			g.func.c_br(loop)
+			g.loop_breakpoint_stack.pop()
+		}
+		g.func.c_end(loop)
+	}
+	g.func.c_end(block)
+}
+
+fn (mut g Gen) for_in_string(node ast.ForInStmt) {
+	block := g.func.c_block([], [])
+	{
+		idx_var := g.new_local('__idx', ast.int_type)
+		g.literalint(0, ast.int_type)
+		g.set(idx_var)
+
+		// String ptr
+		string_var := g.new_local('__string', ast.string_type)
+		g.expr(node.cond, ast.string_type)
+		g.set(string_var)
+
+		len_var := g.new_local('__len', ast.int_type)
+		g.get(string_var)
+		g.load_field(ast.string_type, ast.int_type, 'len')
+		g.set(len_var)
+
+		loop := g.func.c_loop([], [])
+		{
+			g.loop_breakpoint_stack << LoopBreakpoint{
+				c_continue: loop
+				c_break:    block
+				name:       node.label
+			}
+
+			// if index >= length
+			g.get(idx_var)
+			g.get(len_var)
+			g.func.ge(.i32_t, false)
+			g.func.c_br_if(block)
+
+			// _ -> No variable in the loop
+			if node.val_var != '_' {
+				char_var := g.new_local(node.val_var, node.val_type)
+
+				// Use string.at(idx) method to get the byte, don't reinvent the wheel
+				g.get(string_var)
+				g.get(idx_var)
+				g.func.call('string.at')
+
+				g.set(char_var)
+			}
+
+			// Inside loop
+			g.expr_stmts(node.stmts, ast.void_type)
+
+			// idx++
+			g.set_prepare(idx_var)
+			{
+				g.get(idx_var)
+				g.literalint(1, ast.int_type)
+				g.func.add(.i32_t)
+			}
+			g.set(idx_var)
+
+			g.func.c_br(loop)
+			g.loop_breakpoint_stack.pop()
+		}
+		g.func.c_end(loop)
+	}
+	g.func.c_end(block)
+}
+
 pub fn (g &Gen) file_pos(pos token.Pos) string {
-	return '${g.file_path}:${pos.line_nr + 1}:${pos.col + 1}'
+	return '${os.to_slash(g.file_path)}:${pos.line_nr + 1}:${pos.col + 1}'
 }
 
 pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
@@ -1009,30 +1594,38 @@ pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
 
 				loop := g.func.c_loop([], [])
 				{
-					g.loop_breakpoint_stack << LoopBreakpoint{
-						c_continue: loop
-						c_break:    block
-						name:       node.label
-					}
+					continue_block := g.func.c_block([], [])
+					{
+						g.loop_breakpoint_stack << LoopBreakpoint{
+							c_continue: continue_block
+							c_break:    block
+							name:       node.label
+						}
 
-					if node.has_cond {
-						g.expr(node.cond, ast.bool_type)
-						g.func.eqz(.i32_t)
-						g.func.c_br_if(block) // !cond, goto end
-					}
+						if node.has_cond {
+							g.expr(node.cond, ast.bool_type)
+							g.func.eqz(.i32_t)
+							g.func.c_br_if(block) // !cond, goto end
+						}
 
-					g.expr_stmts(node.stmts, ast.void_type)
+						g.expr_stmts(node.stmts, ast.void_type)
+
+						g.loop_breakpoint_stack.pop()
+					}
+					g.func.c_end(continue_block)
 
 					if node.has_inc {
 						g.expr_stmt(node.inc, ast.void_type)
 					}
 
 					g.func.c_br(loop)
-					g.loop_breakpoint_stack.pop()
 				}
 				g.func.c_end(loop)
 			}
 			g.func.c_end(block)
+		}
+		ast.ForInStmt {
+			g.for_in_stmt(node)
 		}
 		ast.BranchStmt {
 			mut bp := g.loop_breakpoint_stack.last()
@@ -1114,9 +1707,13 @@ pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
 						}
 					}
 
-					if !passed && node.op == .assign {
-						if v := g.get_var_from_expr(left) {
-							var = v
+					if !passed {
+						if node.op == .assign {
+							if v := g.get_var_from_expr(left) {
+								var = v
+							}
+						} else if node.op == .plus_assign && g.is_param_type(rt) {
+							var = g.new_local('', rt)
 						}
 					}
 
@@ -1130,7 +1727,8 @@ pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
 					right := node.right[0]
 					match right {
 						ast.IfExpr {
-							params := node.left_types.filter(!g.is_param_type(it)).map(g.get_wasm_type(it))
+							params :=
+								node.left_types.filter(!g.is_param_type(it)).map(g.get_wasm_type(it))
 							g.if_branch(right, right.typ, params, 0, rvars)
 							set = true
 						}
@@ -1217,6 +1815,9 @@ pub fn (mut g Gen) expr_stmt(node ast.Stmt, expected ast.Type) {
 			// assumed expected == void
 			g.asm_stmt(node)
 		}
+		ast.EmptyStmt {
+			// EmptyStmt nodes are emitted by earlier compiler passes for eliminated statements.
+		}
 		else {
 			g.w_error('wasm.expr_stmt(): unhandled node: ' + node.type_name())
 		}
@@ -1270,6 +1871,111 @@ mut:
 	fields map[string]i64
 }
 
+fn (mut g Gen) eval_enum_field_expr(expr ast.Expr) ?i64 {
+	match expr {
+		ast.IntegerLiteral {
+			return expr.val.i64()
+		}
+		ast.CharLiteral {
+			return i64(ast.char_literal_rune_value(expr.val)?)
+		}
+		ast.BoolLiteral {
+			return if expr.val { i64(1) } else { i64(0) }
+		}
+		ast.ParExpr {
+			return g.eval_enum_field_expr(expr.expr)
+		}
+		ast.CastExpr {
+			return g.eval_enum_field_expr(expr.expr)
+		}
+		ast.PrefixExpr {
+			right := g.eval_enum_field_expr(expr.right)?
+			match expr.op {
+				.plus {
+					return right
+				}
+				.minus {
+					return -right
+				}
+				.bit_not {
+					return ~right
+				}
+				else {
+					return none
+				}
+			}
+		}
+		ast.InfixExpr {
+			left := g.eval_enum_field_expr(expr.left)?
+			right := g.eval_enum_field_expr(expr.right)?
+			match expr.op {
+				.plus {
+					return left + right
+				}
+				.minus {
+					return left - right
+				}
+				.mul {
+					return left * right
+				}
+				.div {
+					if right == 0 {
+						return none
+					}
+					return left / right
+				}
+				.mod {
+					if right == 0 {
+						return none
+					}
+					return left % right
+				}
+				.left_shift {
+					return i64(u64(left) << int(right))
+				}
+				.right_shift {
+					return left >> int(right)
+				}
+				.unsigned_right_shift {
+					return i64(u64(left) >> int(right))
+				}
+				.amp {
+					return left & right
+				}
+				.pipe {
+					return left | right
+				}
+				.xor {
+					return left ^ right
+				}
+				else {
+					return none
+				}
+			}
+		}
+		ast.Ident {
+			mut obj := expr.obj
+			if obj !in [ast.ConstField, ast.GlobalField] {
+				obj = expr.scope.find(expr.name) or { return none }
+			}
+			match mut obj {
+				ast.ConstField {
+					return g.eval_enum_field_expr(obj.expr)
+				}
+				ast.GlobalField {
+					return g.eval_enum_field_expr(obj.expr)
+				}
+				else {
+					return none
+				}
+			}
+		}
+		else {
+			return none
+		}
+	}
+}
+
 pub fn (mut g Gen) calculate_enum_fields() {
 	// `enum Enum as u64` is supported
 	for name, decl in g.table.enum_decls {
@@ -1277,7 +1983,9 @@ pub fn (mut g Gen) calculate_enum_fields() {
 		mut value := if decl.is_flag { i64(1) } else { 0 }
 		for field in decl.fields {
 			if field.has_expr {
-				value = g.eval.expr(field.expr, decl.typ).int_val()
+				value = g.eval_enum_field_expr(field.expr) or {
+					g.w_error('wasm: unsupported enum expression for `${name}.${field.name}`')
+				}
 			}
 			enum_vals.fields[field.name] = value
 			if decl.is_flag {
@@ -1296,12 +2004,10 @@ pub fn gen(files []&ast.File, mut table ast.Table, out_name string, w_pref &pref
 		table:     table
 		pref:      w_pref
 		files:     files
-		eval:      eval.new_eval(table, w_pref)
 		pool:      serialise.new_pool(table, store_relocs: true, null_terminated: false)
 		stack_top: stack_top
 		data_base: calc_align(stack_top + 1, 16)
 	}
-	g.table.pointer_size = 4
 	g.mod.assign_memory('memory', true, 1, none)
 
 	if g.pref.is_debug {
@@ -1332,31 +2038,31 @@ pub fn gen(files []&ast.File, mut table ast.Table, out_name string, w_pref &pref
 
 	if out_name != '-' {
 		os.write_file_array(out_name, mod) or { panic(err) }
+		// The enabled feature set (Safari-15 floor plus any `-d` opt-in) drives
+		// both validation and optimisation, so compute it once and share it.
+		feats := g.enabled_wasm_features()
 		if g.pref.wasm_validate {
-			exe := $if windows { 'wasm-validate.exe' } $else { 'wasm-validate' }
-			if rt := os.find_abs_path_of_executable(exe) {
-				mut p := os.new_process(rt)
-				p.set_args([out_name])
-				p.set_redirect_stdio()
-				p.run()
-				err := p.stderr_slurp()
-				p.wait()
-				if p.code != 0 {
-					eprintln(err)
-					g.w_error('validation failed, this should not happen. report an issue with the above messages, the webassembly generated, and appropriate code.')
-				}
-			} else {
-				g.w_error('${exe} not found! Try installing WABT (WebAssembly Binary Toolkit). Run `./cmd/tools/install_wabt.vsh`, to download a prebuilt executable for your platform.')
-			}
+			g.validate_wasm(out_name, feats)
 		}
 		if g.pref.is_prod {
 			exe := $if windows { 'wasm-opt.exe' } $else { 'wasm-opt' }
 			if rt := os.find_abs_path_of_executable(exe) {
-				// -lmu: low memory unused, very important optimisation
-				res := os.execute('${os.quoted_path(rt)} -all -lmu -c -O4 ${os.quoted_path(out_name)} -o ${os.quoted_path(out_name)}')
+				g.check_wasm_opt_version(rt)
+				// -lmu: low memory unused, very important optimisation.
+				// Feature flags are an explicit floor-safe allowlist (never `-all`),
+				// so wasm-opt cannot silently introduce opcodes past the baseline.
+				flags := binaryen_feature_flags(feats)
+				res :=
+					os.execute('${os.quoted_path(rt)} ${flags} -lmu -c -O4 ${os.quoted_path(out_name)} -o ${os.quoted_path(out_name)}')
 				if res.exit_code != 0 {
 					eprintln(res.output)
 					g.w_error('${rt} failed, this should not happen. Report an issue with the above messages, the webassembly generated, and appropriate code.')
+				}
+				// Re-validate AFTER optimisation: a passing pre-opt validation is
+				// not sufficient, wasm-opt must not have introduced any opcode past
+				// the enabled feature floor.
+				if g.pref.wasm_validate {
+					g.validate_wasm(out_name, feats)
 				}
 			} else {
 				g.w_error('${exe} not found! Try installing Binaryen.
@@ -1369,5 +2075,43 @@ pub fn gen(files []&ast.File, mut table ast.Table, out_name string, w_pref &pref
 		}
 	} else if g.pref.wasm_validate || g.pref.is_prod {
 		eprintln('stdout output, cannot validate or optimise wasm')
+	}
+}
+
+// validate_wasm runs `wasm-validate` over the emitted module at `out_name`,
+// constraining it to the enabled feature set so that any opcode past the floor
+// fails validation instead of passing under WABT's permissive defaults.
+fn (mut g Gen) validate_wasm(out_name string, feats []WasmFeature) {
+	exe := $if windows { 'wasm-validate.exe' } $else { 'wasm-validate' }
+	if rt := os.find_abs_path_of_executable(exe) {
+		mut p := os.new_process(rt)
+		mut vargs := wabt_validate_args(feats)
+		vargs << out_name
+		p.set_args(vargs)
+		p.set_redirect_stdio()
+		p.run()
+		err := p.stderr_slurp()
+		p.wait()
+		if p.code != 0 {
+			eprintln(err)
+			g.w_error('validation failed, this should not happen. report an issue with the above messages, the webassembly generated, and appropriate code.')
+		}
+	} else {
+		g.w_error('${exe} not found! Try installing WABT (WebAssembly Binary Toolkit). Run `./cmd/tools/install_wabt.vsh`, to download a prebuilt executable for your platform.')
+	}
+}
+
+// check_wasm_opt_version emits a soft warning if the resolved wasm-opt is older
+// than the version the toolchain pins. It never fails the build (a hard pin with
+// checksums belongs to the build/release pipeline, not the backend).
+fn (mut g Gen) check_wasm_opt_version(exe string) {
+	res := os.execute('${os.quoted_path(exe)} --version')
+	if res.exit_code != 0 {
+		return
+	}
+	// `wasm-opt --version` prints e.g. "wasm-opt version 108"
+	ver := res.output.all_after_last(' ').trim_space().int()
+	if ver != 0 && ver < wasm_opt_min_version {
+		eprintln('warning: wasm-opt version ${ver} is older than the pinned minimum (${wasm_opt_min_version}); `-prod` output may differ. Run `./cmd/tools/install_binaryen.vsh` to update.')
 	}
 }

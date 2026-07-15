@@ -3,6 +3,7 @@
 // that can be found in the LICENSE file.
 module main
 
+import hash
 import os
 import term
 import v.help
@@ -17,6 +18,8 @@ const external_tools = [
 	'ast',
 	'bin2v',
 	'bug',
+	'bug-report',
+	'bug-report-send',
 	'build-examples',
 	'build-tools',
 	'build-vbinaries',
@@ -30,9 +33,11 @@ const external_tools = [
 	'doctor',
 	'download',
 	'fmt',
+	'git-fmt-hook',
 	'gret',
 	'ls',
 	'missdoc',
+	'quest',
 	'reduce',
 	'repl',
 	'repeat',
@@ -42,6 +47,7 @@ const external_tools = [
 	'shader',
 	'share',
 	'should-compile-all',
+	'sqlite',
 	'symlink',
 	'scan',
 	'test',
@@ -59,7 +65,6 @@ const external_tools = [
 	'watch',
 	'where',
 ]
-const list_of_flags_that_allow_duplicates = ['cc', 'd', 'define', 'cf', 'cflags']
 
 @[unsafe]
 fn timers_pointer(p &util.Timers) &util.Timers {
@@ -110,8 +115,9 @@ fn main() {
 		return
 	}
 	mut args_and_flags := util.join_env_vflags_and_os_args()[1..]
-	prefs, command := pref.parse_args_and_show_errors(external_tools, args_and_flags,
-		true)
+	prefs, command := pref.parse_args_and_show_errors(external_tools, args_and_flags, true)
+	maybe_delegate_to_vvmrc(command, prefs)
+	maybe_delegate_to_ownership(command, prefs)
 	if prefs.use_cache && os.user_os() == 'windows' {
 		eprintln('-usecache is currently disabled on windows')
 		exit(1)
@@ -143,7 +149,8 @@ fn main() {
 			util.launch_tool(prefs.is_verbose, 'vcreate', os.args[1..])
 			return
 		}
-		'install', 'list', 'outdated', 'remove', 'search', 'show', 'update', 'upgrade' {
+		'install', 'link', 'list', 'outdated', 'remove', 'search', 'show', 'unlink', 'update',
+		'upgrade' {
 			util.launch_tool(prefs.is_verbose, 'vpm', os.args[1..])
 			return
 		}
@@ -151,7 +158,8 @@ fn main() {
 			util.launch_tool(prefs.is_verbose, 'vdoc', ['doc', 'vlib'])
 		}
 		'interpret' {
-			util.launch_tool(prefs.is_verbose, 'builders/interpret_builder', os.args[1..])
+			eprintln('The eval backend has been removed.')
+			exit(1)
 		}
 		'get' {
 			eprintln('V Error: Use `v install` to install modules from vpm.vlang.io')
@@ -171,13 +179,14 @@ fn main() {
 			}
 		}
 	}
+
 	if prefs.is_help {
 		invoke_help_and_exit(args)
 	}
 
 	other_commands := ['run', 'crun', 'build', 'build-module', 'help', 'version', 'new', 'init',
-		'install', 'list', 'outdated', 'remove', 'search', 'show', 'update', 'upgrade', 'vlib-docs',
-		'interpret', 'translate']
+		'install', 'link', 'list', 'outdated', 'remove', 'search', 'show', 'unlink', 'update',
+		'upgrade', 'vlib-docs', 'translate']
 	mut all_commands := []string{}
 	all_commands << external_tools
 	all_commands << other_commands
@@ -189,13 +198,81 @@ fn main() {
 
 fn invoke_help_and_exit(remaining []string) {
 	match remaining.len {
-		0, 1 { help.print_and_exit('default') }
-		2 { help.print_and_exit(remaining[1]) }
+		0, 1 { help.print_and_exit('default', exit_code: 0) }
+		2 { help.print_and_exit(remaining[1], exit_code: 0) }
 		else {}
 	}
+
 	eprintln('${term.highlight_command('v help')}: provide only one help topic.')
 	eprintln('For usage information, use ${term.highlight_command('v help')}.')
 	exit(1)
+}
+
+fn maybe_delegate_to_ownership(command string, prefs &pref.Preferences) {
+	is_ownership := '-ownership' in os.args
+	if !is_ownership {
+		return
+	}
+	if !is_ownership_relevant_command(command, prefs) {
+		eprintln('v: `-ownership` currently supports direct compilation only. Use `v -ownership module_dir`.')
+		exit(1)
+	}
+	launch_v3_ownership_compiler(prefs.is_verbose, os.args[1..].filter(it != '-ownership'))
+}
+
+fn is_ownership_relevant_command(command string, prefs &pref.Preferences) bool {
+	if prefs.path == '' || prefs.is_run || prefs.is_crun {
+		return false
+	}
+	return prefs.path == command && (command.ends_with('.v') || os.exists(command))
+}
+
+@[noreturn]
+fn launch_v3_ownership_compiler(is_verbose bool, args []string) {
+	vexe := pref.vexe_path()
+	vroot := os.dir(vexe)
+	util.set_vroot_folder(vroot)
+	tool_name := 'v3_ownership'
+	v3_main_source := os.join_path(vroot, 'vlib', 'v3', 'v3.v')
+	v3_src_dir := os.join_path(vroot, 'vlib', 'v3')
+	v3_exe := cached_v3_ownership_executable_path(vroot)
+	v3_exe_dir := os.dir(v3_exe)
+	os.mkdir_all(v3_exe_dir) or {
+		eprintln('cannot create `${v3_exe_dir}`: ${err}')
+		exit(1)
+	}
+	if util.should_recompile_tool(vexe, v3_src_dir, tool_name, v3_exe) {
+		compilation_command := '${os.quoted_path(vexe)} -gc none -d ownership -o ${os.quoted_path(v3_exe)} ${os.quoted_path(v3_main_source)}'
+		if is_verbose {
+			println('Compiling ${tool_name} with: "${compilation_command}"')
+		}
+		current_work_dir := os.getwd()
+		os.chdir(vroot) or {}
+		tool_compilation := os.execute(compilation_command)
+		os.chdir(current_work_dir) or {}
+		if tool_compilation.exit_code != 0 {
+			eprintln('cannot compile `${v3_main_source}`: ${tool_compilation.exit_code}\n${tool_compilation.output}')
+			exit(1)
+		}
+	}
+	mut forwarded_args := ['-ownership']
+	for arg in args {
+		forwarded_args << arg
+	}
+	quoted_args := forwarded_args.map(os.quoted_path(it)).join(' ')
+	if is_verbose {
+		println('Launching ${tool_name}: ${os.quoted_path(v3_exe)} ${quoted_args}')
+	}
+	os.setenv('VCHILD', 'true', true)
+	os.setenv('VEXE', os.real_path(vexe), true)
+	res := os.system('${os.quoted_path(v3_exe)} ${quoted_args}')
+	exit(res)
+}
+
+fn cached_v3_ownership_executable_path(vroot string) string {
+	vroot_hash := hash.sum64_string(os.real_path(vroot), 0).hex_full()
+	return util.path_of_executable(os.join_path(os.vtmp_dir(), 'v', 'delegated_v3', vroot_hash,
+		'v3_ownership'))
 }
 
 fn rebuild(prefs &pref.Preferences) {
@@ -213,15 +290,9 @@ fn rebuild(prefs &pref.Preferences) {
 		.js_node, .js_freestanding, .js_browser {
 			util.launch_tool(prefs.is_verbose, 'builders/js_builder', os.args[1..])
 		}
-		.native {
-			util.launch_tool(prefs.is_verbose, 'builders/native_builder', os.args[1..])
-		}
 		.interpret {
-			util.launch_tool(prefs.is_verbose, 'builders/interpret_builder', os.args[1..])
-		}
-		.golang {
-			println('using Go WIP backend...')
-			util.launch_tool(prefs.is_verbose, 'builders/golang_builder', os.args[1..])
+			eprintln('The eval backend has been removed.')
+			exit(1)
 		}
 		.wasm {
 			util.launch_tool(prefs.is_verbose, 'builders/wasm_builder', os.args[1..])

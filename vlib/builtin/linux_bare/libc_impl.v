@@ -4,10 +4,11 @@ import dlmalloc
 
 __global global_allocator dlmalloc.Dlmalloc
 
+@[export: 'memcpy']
 @[unsafe]
-pub fn memcpy(dest voidptr, src voidptr, n usize) voidptr {
+pub fn memcpy(dest voidptr, const_src voidptr, n usize) voidptr {
 	dest_ := unsafe { &u8(dest) }
-	src_ := unsafe { &u8(src) }
+	src_ := unsafe { &u8(const_src) }
 	unsafe {
 		for i in 0 .. int(n) {
 			dest_[i] = src_[i]
@@ -22,14 +23,16 @@ fn __malloc(n usize) voidptr {
 	return unsafe { global_allocator.malloc(n) }
 }
 
+@[export: 'strlen']
 @[unsafe]
-fn strlen(_s voidptr) usize {
-	s := unsafe { &u8(_s) }
+fn strlen(const_s voidptr) usize {
+	s := unsafe { &u8(const_s) }
 	mut i := 0
 	for ; unsafe { s[i] } != 0; i++ {}
 	return usize(i)
 }
 
+@[export: 'realloc']
 @[unsafe]
 fn realloc(old_area voidptr, new_size usize) voidptr {
 	if old_area == 0 {
@@ -50,6 +53,7 @@ fn realloc(old_area voidptr, new_size usize) voidptr {
 	}
 }
 
+@[export: 'memset']
 @[unsafe]
 fn memset(s voidptr, c int, n usize) voidptr {
 	mut s_ := unsafe { &char(s) }
@@ -61,10 +65,11 @@ fn memset(s voidptr, c int, n usize) voidptr {
 	return unsafe { s }
 }
 
+@[export: 'memmove']
 @[unsafe]
-fn memmove(dest voidptr, src voidptr, n usize) voidptr {
+fn memmove(dest voidptr, const_src voidptr, n usize) voidptr {
 	dest_ := unsafe { &u8(dest) }
-	src_ := unsafe { &u8(src) }
+	src_ := unsafe { &u8(const_src) }
 	mut temp_buf := unsafe { malloc(int(n)) }
 	for i in 0 .. int(n) {
 		unsafe {
@@ -95,9 +100,10 @@ fn getchar() int {
 	return int(x)
 }
 
-fn memcmp(a voidptr, b voidptr, n usize) int {
-	a_ := unsafe { &u8(a) }
-	b_ := unsafe { &u8(b) }
+@[export: 'memcmp']
+fn memcmp(const_a voidptr, const_b voidptr, n usize) int {
+	a_ := unsafe { &u8(const_a) }
+	b_ := unsafe { &u8(const_b) }
 	for i in 0 .. int(n) {
 		if unsafe { a_[i] != b_[i] } {
 			unsafe {

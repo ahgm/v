@@ -1,15 +1,22 @@
+@[deprecated: 'use compress.deflate instead']
+@[deprecated_after: '2026-07-31']
 module compress
 
 #flag -I @VEXEROOT/thirdparty/zip
+#define MINIZ_NO_ZLIB_COMPATIBLE_NAMES
 #include "miniz.h"
 
+@[deprecated: 'use max_i32 (from builtin) instead']
+@[deprecated_after: '2026-07-31']
 pub const max_size = u64(1 << 31)
 
-fn C.tdefl_compress_mem_to_heap(source_buf voidptr, source_buf_len usize, out_len &usize, flags int) voidptr
-fn C.tinfl_decompress_mem_to_heap(source_buf voidptr, source_buf_len usize, out_len &usize, flags int) voidptr
+fn C.tdefl_compress_mem_to_heap(source_buf voidptr, source_buf_len usize, out_len &usize, flags i32) voidptr
+fn C.tinfl_decompress_mem_to_heap(source_buf voidptr, source_buf_len usize, out_len &usize, flags i32) voidptr
 
 // compresses an array of bytes based on providing flags and returns the compressed bytes in a new array
 // NB: this is a low level api, a high level implementation like zlib/gzip should be preferred
+@[deprecated: 'use compress.deflate.compress instead']
+@[deprecated_after: '2026-07-31']
 @[manualfree]
 pub fn compress(data []u8, flags int) ![]u8 {
 	if u64(data.len) > max_size {
@@ -33,6 +40,8 @@ pub fn compress(data []u8, flags int) ![]u8 {
 
 // decompresses an array of bytes based on providing flags and returns the decompressed bytes in a new array
 // NB: this is a low level api, a high level implementation like zlib/gzip should be preferred
+@[deprecated: 'use compress.deflate.decompress instead']
+@[deprecated_after: '2026-07-31']
 @[manualfree]
 pub fn decompress(data []u8, flags int) ![]u8 {
 	mut out_len := usize(0)
@@ -57,11 +66,16 @@ pub fn decompress(data []u8, flags int) ![]u8 {
 // the decompressor to send more chunks, otherwise the decompression stops.
 // The userdata parameter comes from the call to decompress_with_callback/4, and can be used
 // to pass arbitrary data, without having to create a closure.
+
+@[deprecated: 'use compress.deflate.ChunkCallback instead']
+@[deprecated_after: '2026-07-31']
 pub type ChunkCallback = fn (chunk []u8, userdata voidptr) int
 
 // decompress_with_callback decompresses an array of bytes, based on the provided flags, and a V fn callback to receive decompressed chunks, of at most 32 kilobytes each.
 // It returns the total decompressed length, or a decompression error.
 // NB: this is a low level api, a high level implementation like zlib/gzip should be preferred.
+@[deprecated: 'use compress.deflate.decompress_with_callback instead']
+@[deprecated_after: '2026-07-31']
 pub fn decompress_with_callback(data []u8, cb ChunkCallback, userdata voidptr, flags int) !u64 {
 	cbdata := DecompressionCallBackData{
 		data:     data.data
@@ -69,8 +83,8 @@ pub fn decompress_with_callback(data []u8, cb ChunkCallback, userdata voidptr, f
 		cb:       cb
 		userdata: userdata
 	}
-	status := C.tinfl_decompress_mem_to_callback(cbdata.data, &cbdata.size, c_cb_for_decompress_mem,
-		&cbdata, flags)
+	status := C.tinfl_decompress_mem_to_callback(cbdata.data, &cbdata.size,
+		c_cb_for_decompress_mem, &cbdata, flags)
 	if status == 0 {
 		return error('decompression error')
 	}
@@ -97,4 +111,4 @@ fn c_cb_for_decompress_mem(buf &char, len int, pdcbd voidptr) int {
 
 type DecompressCallback = fn (const_buffer voidptr, len int, userdata voidptr) int
 
-fn C.tinfl_decompress_mem_to_callback(const_input_buffer voidptr, psize &usize, put_buf_cb DecompressCallback, userdata voidptr, flags int) int
+fn C.tinfl_decompress_mem_to_callback(const_input_buffer voidptr, psize &usize, put_buf_cb DecompressCallback, userdata voidptr, flags i32) i32

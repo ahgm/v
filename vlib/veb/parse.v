@@ -36,7 +36,7 @@ fn parse_attrs(name string, attrs []string) !([]http.Method, string, string) {
 			continue
 		}
 		if attr.starts_with('host:') {
-			host = attr.all_after('host:').trim_space()
+			host = attr.all_after('host:').trim_space().trim('\'"')
 			x.delete(i)
 			continue
 		}
@@ -94,4 +94,24 @@ fn parse_form_from_request(request http.Request) !(map[string]string, map[string
 		return http.parse_multipart_form(request.data, boundary)
 	}
 	return http.parse_form(request.data), map[string][]http.FileData{}
+}
+
+// has_route_attributes checks if a method has attributes that indicate it should be a route handler
+fn has_route_attributes(attrs []string) bool {
+	if attrs.len == 0 {
+		return false
+	}
+	for attr in attrs {
+		attru := attr.to_upper()
+		if attru in ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] {
+			return true
+		}
+		if attr.starts_with('/') {
+			return true
+		}
+		if attr.starts_with('host:') {
+			return true
+		}
+	}
+	return false
 }

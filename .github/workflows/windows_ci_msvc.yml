@@ -1,0 +1,97 @@
+name: CI Windows MSVC
+
+on:
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - 'vlib/v3/**'
+      - '**.md'
+      - '**.yml'
+      - '!**.bat'
+      - '!**/windows_ci_msvc.yml'
+      - 'cmd/tools/**'
+      - '!cmd/tools/builders/**.v'
+  pull_request:
+    paths-ignore:
+      - 'vlib/v3/**'
+      - '**.md'
+      - '**.yml'
+      - '!**.bat'
+      - '!**/windows_ci_msvc.yml'
+      - '!**/windows-install-sqlite.bat'
+      - 'cmd/tools/**'
+      - '!cmd/tools/builders/**.v'
+
+concurrency:
+  group: windows-${{ github.workflow }}-${{ github.ref == 'refs/heads/master' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  msvc-windows:
+    runs-on: windows-2022
+    timeout-minutes: 70
+    env:
+      VFLAGS: -cc msvc
+      VTEST_SHOW_LONGEST_BY_RUNTIME: 3
+      VTEST_SHOW_LONGEST_BY_COMPTIME: 3
+      VTEST_SHOW_LONGEST_BY_TOTALTIME: 3
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Verify MSVC tools
+        run: |
+          where.exe cl.exe
+          where.exe link.exe
+          where.exe dumpbin.exe
+          $headers = @($env:INCLUDE -split ';' | Where-Object { $_ -and $_.Trim().Length -gt 0 } | ForEach-Object { Join-Path $_ 'd3d11.h' } | Where-Object { Test-Path $_ })
+          if ($headers.Count -eq 0) {
+            throw 'd3d11.h not found in INCLUDE; Windows SDK is not visible to the D3D11 multiwindow lane'
+          }
+          Write-Host "Found d3d11.h at $($headers[0])"
+      - name: Build
+        run: |
+          echo %VFLAGS%
+          echo $VFLAGS
+          .\makev.bat -msvc
+          .\v.exe symlink
+      - name: Legacy gg import multiwindow isolation
+        run: v -cc msvc test vlib/gg/legacy_import_multiwindow_isolation_test.v
+      - name: Multiwindow D3D11 smoke
+        run: v -cc msvc -d gg_multiwindow -d sokol_d3d11 test vlib/x/multiwindow vlib/gg/multiwindow_api_d_gg_multiwindow_test.v vlib/gg/frame_pacing_test.v vlib/gg/draw_fns_api_test.v vlib/gg/draw_rect_empty_test.v
+      - name: Compile gg multiwindow example with D3D11
+        run: v -cc msvc -d gg_multiwindow -d sokol_d3d11 -o "$env:TEMP\gg_multiwindow.exe" examples/gg/multiwindow.v
+      - name: All code is formatted
+        run: v -silent test-cleancode
+      - name: Test -cc msvc works
+        run: v -no-retry-compilation run examples/hello_world.v
+      - name: Install dependencies
+        run: |
+          v retry -- v setup-freetype
+          .\.github\workflows\windows-install-sqlite.bat
+      - name: v doctor
+        run: |
+          v doctor
+      - name: Verify `v test` works
+        run: |
+          echo $VFLAGS
+          v cmd/tools/test_if_v_test_system_works.v
+          ./cmd/tools/test_if_v_test_system_works
+      - name: Test pure V math module
+        run: v -silent -exclude @vlib/math/*.c.v test vlib/math/
+      - name: Test fasthttp module
+        run: v -silent test vlib/fasthttp/
+      - name: Self tests
+        run: v -silent test-self vlib
+      - name: Test v->js
+        run: v -o hi.js examples/js_hello_world.v && node hi.js
+      - name: Test v binaries
+        run: v build-vbinaries
+      - name: Build examples
+        run: v build-examples
+      - name: Compile and run the veb example (fasthttp) and check its HTML
+        run: v run .github/workflows/veb_example_windows_smoke.v
+      - name: v2 self compilation
+        run: v -o v2.exe cmd/v && .\v2.exe -o v3.exe cmd/v

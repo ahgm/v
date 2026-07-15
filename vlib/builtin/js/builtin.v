@@ -142,12 +142,23 @@ pub fn error(message string) IError {
 // Example: if ouch { return error_with_code('an error occurred', 1) }
 @[inline]
 pub fn error_with_code(message string, code int) IError {
-	// trace_error('$message | code: $code')
+	// trace_error('${message} | code: ${code}')
 	return &MessageError{
 		msg:  message
 		code: code
 	}
 }
+
+// error_sentinel is a reusable, allocation-free `IError` for hot "not found"/stateless
+// error paths. Unlike `error('...')`, which allocates a fresh `MessageError` on every
+// call, `error_sentinel` is a single cached const (mirroring how `none` works for `?T`),
+// so `return error_sentinel` from a `!T` function avoids the per-call allocation.
+// Use it when the caller discards the error (e.g. `x() or { ... }`) and the specific
+// message is not needed; its `.msg()` is just `'error'`.
+// Example: fn find(x int) !int { if x < 0 { return error_sentinel } return x }
+pub const error_sentinel = IError(&MessageError{
+	msg: 'error'
+})
 
 // free allows for manually freeing memory allocated at the address `ptr`.
 // However, this is a no-op on JS backend

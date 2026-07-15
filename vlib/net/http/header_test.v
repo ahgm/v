@@ -83,7 +83,7 @@ fn test_delete_header() {
 	mut r := new_request(.get, '', '')
 	r.header.set(.authorization, 'foo')
 	r.header.delete(.authorization)
-	assert r.header.get(.authorization)! == ''
+	assert r.header.get(.authorization)? == ''
 }
 
 fn test_custom_header() {
@@ -140,8 +140,8 @@ fn test_starting_with() {
 	mut h := new_header()
 	h.add_custom('Hello-1', 'world')!
 	h.add_custom('Hello-21', 'world')!
-	assert h.starting_with('Hello-')? == 'Hello-1'
-	assert h.starting_with('Hello-2')? == 'Hello-21'
+	assert h.starting_with('Hello-')! == 'Hello-1'
+	assert h.starting_with('Hello-2')! == 'Hello-21'
 }
 
 fn test_custom_values() {
@@ -311,12 +311,12 @@ fn test_header_from_map() {
 
 fn test_custom_header_from_map() {
 	h := new_custom_header_from_map({
-		'Server': 'VWeb'
+		'Server': 'Veb'
 		'foo':    'bar'
 	})!
 	assert h.contains_custom('server')
 	assert h.contains_custom('foo')
-	assert h.get_custom('server') or { '' } == 'VWeb'
+	assert h.get_custom('server') or { '' } == 'Veb'
 	assert h.get_custom('foo') or { '' } == 'bar'
 }
 
@@ -326,7 +326,7 @@ fn test_header_join() {
 		CommonHeader.expires: 'yesterday'
 	})
 	h2 := new_custom_header_from_map({
-		'Server': 'VWeb'
+		'Server': 'Veb'
 		'foo':    'bar'
 	})!
 	h3 := h1.join(h2)
@@ -347,35 +347,35 @@ fn test_header_join() {
 	assert h3.contains_custom('foo')
 }
 
-fn parse_headers_test(s string, expected map[string]string) ? {
-	assert parse_headers(s)? == new_custom_header_from_map(expected)?
+fn parse_headers_test(s string, expected map[string]string) ! {
+	assert parse_headers(s)! == new_custom_header_from_map(expected)!
 }
 
 fn test_parse_headers() ! {
 	parse_headers_test('foo: bar', {
 		'foo': 'bar'
-	})?
+	})!
 	parse_headers_test('foo: \t  bar', {
 		'foo': 'bar'
-	})?
+	})!
 	parse_headers_test('foo: bar\r\n\tbaz', {
 		'foo': 'bar baz'
-	})?
+	})!
 	parse_headers_test('foo: bar \r\n\tbaz\r\n   buzz', {
 		'foo': 'bar baz buzz'
-	})?
+	})!
 	parse_headers_test('foo: bar\r\nbar:baz', {
 		'foo': 'bar'
 		'bar': 'baz'
-	})?
+	})!
 	parse_headers_test('foo: bar\r\nbar:baz\r\n', {
 		'foo': 'bar'
 		'bar': 'baz'
-	})?
+	})!
 	parse_headers_test('foo: bar\r\nbar:baz\r\n\r\n', {
 		'foo': 'bar'
 		'bar': 'baz'
-	})?
+	})!
 	assert parse_headers('foo: bar\r\nfoo:baz')!.custom_values('foo') == ['bar', 'baz']
 
 	if x := parse_headers(' oops: oh no') {

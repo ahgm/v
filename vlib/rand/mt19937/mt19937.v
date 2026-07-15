@@ -72,14 +72,14 @@ fn get_first_state(seed_data []u32) []u64 {
 }
 
 // calculate_state returns a random state array calculated from the `seed_data`.
-fn calculate_state(seed_data []u32, mut state []u64) []u64 {
+@[ignore_overflow]
+fn calculate_state(seed_data []u32, mut state []u64) {
 	lo := u64(seed_data[0])
 	hi := u64(seed_data[1])
 	state[0] = u64((hi << 32) | lo)
 	for j := 1; j < nn; j++ {
 		state[j] = u64(6364136223846793005) * (state[j - 1] ^ (state[j - 1] >> 62)) + u64(j)
 	}
-	return *state
 }
 
 // seed sets the current random state based on `seed_data`.
@@ -89,7 +89,7 @@ pub fn (mut rng MT19937RNG) seed(seed_data []u32) {
 		eprintln('mt19937 needs only two 32bit integers as seed: [lower, higher]')
 		exit(1)
 	}
-	rng.state = calculate_state(seed_data, mut rng.state)
+	calculate_state(seed_data, mut rng.state)
 	rng.mti = nn
 	rng.bytes_left = 0
 	rng.buffer = 0
@@ -145,7 +145,7 @@ pub fn (mut rng MT19937RNG) u32() u32 {
 const mag01 = [u64(0), u64(matrix_a)]
 
 // u64 returns a pseudorandom 64bit int in range `[0, 2⁶⁴)`.
-@[direct_array_access; inline]
+@[direct_array_access; ignore_overflow; inline]
 pub fn (mut rng MT19937RNG) u64() u64 {
 	mut x := u64(0)
 	mut i := int(0)
@@ -178,8 +178,8 @@ pub fn (mut rng MT19937RNG) block_size() int {
 	return 64
 }
 
-// free should be called when the generator is no longer needed
+// free should be called when the generator is no longer needed.
 @[unsafe]
 pub fn (mut rng MT19937RNG) free() {
-	unsafe { free(rng) }
+	unsafe { rng.state.free() }
 }

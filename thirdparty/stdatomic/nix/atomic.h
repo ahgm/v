@@ -19,7 +19,7 @@
     /* x86 architecture: uses PAUSE instruction for efficient spinning */
     #define cpu_relax() __asm__ __volatile__ ("pause")
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm__) || defined(_M_ARM)
-    #if defined(__TINYC__)
+    #ifdef __TINYC__
         /* TCC compiler limitation: assembly not supported on ARM */
         #define cpu_relax()
     #else
@@ -53,7 +53,11 @@ typedef volatile uintptr_t atomic_uintptr_t;
 
 extern void atomic_thread_fence (int memory_order);
 extern void __atomic_thread_fence (int memory_order);
-#define atomic_thread_fence(order) __atomic_thread_fence (order)
+
+// TinyCC relies on its runtime atomics support for thread fences.
+#if !defined(__APPLE__)
+    #define atomic_thread_fence(order) __atomic_thread_fence(order)
+#endif
 
 // use functions for 64, 32 and 8 bit from libatomic directly
 // since tcc is not capible to use "generic" C functions
@@ -504,14 +508,6 @@ extern inline unsigned long long __aarch64_ldeor8_acq_rel(unsigned long long*ptr
     );
 }
 
-#define aarch64_cas_acq_rel(ptr, expected, desired)      \
-    _Generic((ptr),                                      \
-        char*:         __aarch64_cas1_acq_rel,  \
-        short*:        __aarch64_cas2_acq_rel,  \
-        int*:          __aarch64_cas4_acq_rel,  \
-        long long*:    __aarch64_cas8_acq_rel   \
-    )(ptr, expected, desired)
-
 // relax version
 extern inline _Bool __aarch64_cas1_relax(unsigned char*ptr, unsigned char*expected, unsigned char desired) {
     return __atomic_compare_exchange_1(
@@ -712,14 +708,6 @@ extern inline unsigned long long __aarch64_ldeor8_relax(unsigned long long*ptr, 
         memory_order_relaxed
     );
 }
-
-#define aarch64_cas_relax(ptr, expected, desired)      \
-    _Generic((ptr),                                      \
-        char*:         __aarch64_cas1_relax,  \
-        short*:        __aarch64_cas2_relax,  \
-        int*:          __aarch64_cas4_relax,  \
-        long long*:    __aarch64_cas8_relax   \
-    )(ptr, expected, desired)
 
 #endif // __aarch64__
 

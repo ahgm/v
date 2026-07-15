@@ -4,6 +4,7 @@ The tasks in the lists below are ordered in terms of easiness/time/nerves
 investment.
 
 ### Starting tasks
+0. Run `v quest` once (or several times a day) to gain XP.
 
 1. Read the [language documentation](https://docs.vlang.io/introduction.html) and [standard module documentation](https://modules.vlang.io/).
 
@@ -56,7 +57,7 @@ Be careful, if you introduce a breaking change and rebuild V, you will no longer
 be able to use V to build itself. So it's a good idea to make a backup copy of a
 working compiler executable.
 
-But don't worry, you can always simply run `make` (or `make.bat`), it will
+But don't worry, you can always simply run `make` (or `makev.bat`), it will
 download the C version of the compiler and rebuild it from scratch.
 
 The architecture of the compiler is very simple and has three distinct steps:
@@ -131,6 +132,10 @@ accordingly in the steps below.)
    cp cmd/tools/git_pre_commit_hook.vsh .git/hooks/pre-commit
    chmod 755 .git/hooks/pre-commit
    ```
+   It has to be done in a shell where you have done cd /root/of/your/V_repo once.
+   Step 3 above does it with `cd nv`.
+   I.e. you have to be in the top level folder, that contains the .git folder for the V repository.
+   
 4. `git remote add pullrequest https://github.com/YOUR_GITHUB_USERNAME/v`
 
    Note: The remote named `pullrequest` should point to YOUR own forked repo, not the
@@ -318,18 +323,21 @@ a copy of the compiler rather than replacing it with `v self`.
 | `debug_codegen`                   | Prints automatically generated V code during the scanning phase                                                     |
 | `debug_interface_table`           | Prints generated interfaces during C generation                                                                     |
 | `debug_interface_type_implements` | Prints debug information when checking that a type implements in interface                                          |
-| `print_vweb_template_expansions`  | Prints vweb compiled HTML files                                                                                     |
+| `print_veb_template_expansions`   | Prints veb compiled HTML files                                                                                      |
 | `time_checking`                   | Prints the time spent checking files and other related information                                                  |
 | `time_parsing`                    | Prints the time spent parsing files and other related information                                                   |
 |                                   |                                                                                                                     |
-| `trace_scanner`                   | Prints details about the recognized tokens. *Very* verbose. Use `./vnew -no-builtin -check-syntax file.v` later.    |
+| `trace_scanner`                   | Prints details about the recognized tokens. *Very* verbose. Use with `./vnew -no-builtin -check-syntax file.v` .    |
+| `trace_parse`                     | Prints details about the parsed files (number of tokens, lines, bytes). Use it for parsing order issues.            |
 | `trace_parser`                    | Prints details about parsed statements and expressions. Very verbose. Use it for panics in the parser.              |
+| `trace_check`                     | Prints the .v file which is checked. Use it to diagnose checker order issues.                                       |
 | `trace_checker`                   | Prints details about the statements being checked. Very verbose. Use it for panics in the checker.                  |
 | `trace_transformer`               | Prints details about the statements being transformed. Very verbose. Use it for panics in the transformer stage.    |
 |                                   |                                                                                                                     |
 | `trace_gen`                       | Prints all the strings written to the generated C file. Very verbose.                                               |
 | `trace_gen_wanted_value`          | Prints a backtrace, when a specific *wanted* value, is part of what is printed in the generated C file.             |
 |                                   |        Use: `v -g -o vgen -d trace_gen_wanted -d trace_gen_wanted_value="message = _SLIT0" cmd/v && ./vgen bug.v`   |
+| `trace_cgen`                      | Prints the .v file for which C code generation runs. Use it to diagnose cgen order issues.                          |
 | `trace_cgen_stmt`                 | Prints details about the statements that are being processed by cgen.                                               |
 |                                   |        Use it for panics in cgen, to see the closest input V source line, that caused the panic.                    |
 |                                   |        Note: you need `v -no-parallel -d trace_cgen_stmt -o w cmd/v` to make sense of the output of that,           |

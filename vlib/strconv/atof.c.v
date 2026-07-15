@@ -146,7 +146,11 @@ fn parser(s string) (ParserState, PrepNumber) {
 
 	// read mantissa
 	for i < s.len && s[i].is_digit() {
-		// println("$i => ${s[i]}")
+		if pn.mantissa == 0 && s[i] == c_zero {
+			i++
+			continue
+		}
+		// println("${i} => ${s[i]}")
 		if digx < digits {
 			pn.mantissa *= 10
 			pn.mantissa += u64(s[i] - c_zero)
@@ -161,6 +165,11 @@ fn parser(s string) (ParserState, PrepNumber) {
 	if i < s.len && s[i] == `.` {
 		i++
 		for i < s.len && s[i].is_digit() {
+			if pn.mantissa == 0 && s[i] == c_zero {
+				pn.exponent--
+				i++
+				continue
+			}
 			if digx < digits {
 				pn.mantissa *= 10
 				pn.mantissa += u64(s[i] - c_zero)
@@ -247,6 +256,9 @@ fn converter(mut pn PrepNumber) u64 {
 	s0 = u32(pn.mantissa & u64(0x00000000FFFFFFFF))
 	s1 = u32(pn.mantissa >> 32)
 	s2 = u32(0)
+	if pn.mantissa == 0 && pn.exponent <= 0 {
+		return if pn.negative { double_minus_zero } else { double_plus_zero }
+	}
 	// so we take the decimal exponent off
 	for pn.exponent > 0 {
 		q2, q1, q0 = lsl96(s2, s1, s0) // q = s * 2
@@ -298,6 +310,30 @@ fn converter(mut pn PrepNumber) u64 {
 			s0 = q0
 		}
 	}
+
+	// Handle subnormal (denormalized) numbers - very small numbers near zero
+	//
+	// Normal floats have an implicit leading 1 bit in their mantissa (like 1.xxxxx).
+	// When numbers get too small (binexp < -1022), we can't represent them normally.
+	// Instead, we use subnormals: set exponent to 0 and shift the mantissa right,
+	// losing precision gradually. This prevents abrupt underflow to zero.
+	//
+	// Example: 1.23e-308 is smaller than the minimum normal float, so we:
+	// 1. Keep the normalized mantissa from s2 and s1
+	// 2. Shift it right to "denormalize" it (the leading 1 moves into the mantissa)
+	// 3. Round correctly using the bits that were shifted out
+	// 4. Return with exponent = 0 (subnormal marker)
+	if binexp < -1022 && (s2 | s1) != 0 {
+		shift := -1022 - binexp
+		if shift > 60 {
+			return if pn.negative { double_minus_zero } else { double_plus_zero }
+		}
+		shifted := ((u64(s2) << 32) | u64(s1)) >> u32(shift)
+		q := (shifted >> 8) +
+			u64((shifted >> 7) & 1 != 0 && ((shifted & 0x7F) != 0 || (shifted >> 8) & 1 != 0))
+		return (q & 0x000FFFFFFFFFFFFF) | (u64(pn.negative) << 63)
+	}
+
 	// rounding if needed
 	/*
 	* "round half to even" algorithm
@@ -374,6 +410,8 @@ fn converter(mut pn PrepNumber) u64 {
 			result = double_plus_infinity
 		}
 	} else if binexp < 1 {
+		// Should not reach here for subnormals anymore (handled earlier)
+		// This is now only for true zeros
 		if pn.negative {
 			result = double_minus_zero
 		} else {
@@ -431,5 +469,6 @@ pub fn atof64(s string, param AtoF64Param) !f64 {
 			return error('not a number')
 		}
 	}
+
 	return unsafe { res.f }
 }

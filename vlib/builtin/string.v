@@ -62,17 +62,18 @@ mut:
 pub fn (s string) runes() []rune {
 	mut runes := []rune{cap: s.len}
 	for i := 0; i < s.len; i++ {
-		char_len := utf8_char_len(unsafe { s.str[i] })
+		r, char_len := utf8_decode_rune(unsafe { &s.str[i] }, s.len - i)
+		runes << r
 		if char_len > 1 {
-			end := if s.len - 1 >= i + char_len { i + char_len } else { s.len }
-			mut r := unsafe { s[i..end] }
-			runes << r.utf32_code()
 			i += char_len - 1
-		} else {
-			runes << unsafe { s.str[i] }
 		}
 	}
 	return runes
+}
+
+// graphemes returns the string split into Unicode grapheme clusters.
+pub fn (s string) graphemes() []string {
+	return string_graphemes_impl(s)
 }
 
 // cstring_to_vstring creates a new V string copy of the C style string,
@@ -84,7 +85,8 @@ pub fn (s string) runes() []rune {
 // It will panic, if the pointer `s` is 0.
 @[unsafe]
 pub fn cstring_to_vstring(const_s &char) string {
-	return unsafe { tos2(&u8(const_s)) }.clone()
+	s := unsafe { tos2(byteptr(const_s)) }
+	return s.clone()
 }
 
 // tos_clone creates a new V string copy of the C style string, pointed by `s`.
@@ -93,7 +95,8 @@ pub fn cstring_to_vstring(const_s &char) string {
 // It will panic, if the pointer `s` is 0.
 @[unsafe]
 pub fn tos_clone(const_s &u8) string {
-	return unsafe { tos2(&u8(const_s)) }.clone()
+	s := unsafe { tos2(&u8(const_s)) }
+	return s.clone()
 }
 
 // tos creates a V string, given a C style pointer to a 0 terminated block.
@@ -302,7 +305,7 @@ pub fn (s string) len_utf8() int {
 	mut i := 0
 	for i < s.len {
 		l++
-		i += ((0xe5000000 >> ((unsafe { s.str[i] } >> 3) & 0x1e)) & 3) + 1
+		i += int(((u32(0xe5000000) >> ((unsafe { s.str[i] } >> 3) & 0x1e)) & 3) + 1)
 	}
 	return l
 }
@@ -455,9 +458,7 @@ pub fn (s string) replace_each(vals []string) string {
 	// of the new string to do just one allocation.
 	mut new_len := s.len
 	mut idxs := []RepIndex{cap: 6}
-	defer {
-		unsafe { idxs.free() }
-	}
+	defer { unsafe { idxs.free() } }
 	mut idx := 0
 	s_ := s.clone()
 	for rep_i := 0; rep_i < vals.len; rep_i += 2 {
@@ -494,11 +495,11 @@ pub fn (s string) replace_each(vals []string) string {
 		return s.clone()
 	}
 	idxs.sort(a.idx < b.idx)
-	mut b := unsafe { malloc_noscan(new_len + 1) } // add space for 0 terminator
+	mut buf := unsafe { malloc_noscan(new_len + 1) } // add space for 0 terminator
 	// Fill the new string
 	mut idx_pos := 0
 	mut cur_idx := idxs[idx_pos]
-	mut b_i := 0
+	mut buf_i := 0
 	for i := 0; i < s.len; i++ {
 		if i == cur_idx.idx {
 			// Reached the location of rep, replace it with "with"
@@ -506,9 +507,9 @@ pub fn (s string) replace_each(vals []string) string {
 			with := vals[cur_idx.val_idx + 1]
 			for j in 0 .. with.len {
 				unsafe {
-					b[b_i] = with[j]
+					buf[buf_i] = with[j]
 				}
-				b_i++
+				buf_i++
 			}
 			// Skip the length of rep, since we just replaced it with "with"
 			i += rep.len - 1
@@ -520,18 +521,77 @@ pub fn (s string) replace_each(vals []string) string {
 		} else {
 			// Rep doesnt start here, just copy
 			unsafe {
-				b[b_i] = s.str[i]
+				buf[buf_i] = s.str[i]
 			}
-			b_i++
+			buf_i++
 		}
 	}
 	unsafe {
-		b[new_len] = 0
-		return tos(b, new_len)
+		buf[new_len] = 0
+		return tos(buf, new_len)
 	}
 }
 
-// replace_char replaces all occurrences of the character `rep` multiple occurrences of the character passed in `with` with respect to `repeat`.
+// format replaces positional placeholders like `{0}` and `{1}` in `s`
+// with the corresponding values from `args`.
+// Use `{{` and `}}` to output literal braces.
+@[direct_array_access]
+pub fn (s string) format(args ...string) string {
+	if s.len == 0 {
+		return ''
+	}
+	mut out := strings.new_builder(s.len)
+	mut i := 0
+	for i < s.len {
+		ch := s[i]
+		if ch == `{` {
+			if i + 1 < s.len && s[i + 1] == `{` {
+				out.write_byte(`{`)
+				i += 2
+				continue
+			}
+			mut j := i + 1
+			if j >= s.len || !s[j].is_digit() {
+				out.write_byte(ch)
+				i++
+				continue
+			}
+			mut idx := 0
+			mut overflowed := false
+			for j < s.len && s[j].is_digit() {
+				digit := int(s[j] - `0`)
+				if idx > (max_int - digit) / 10 {
+					overflowed = true
+					break
+				}
+				idx = idx * 10 + digit
+				j++
+			}
+			if !overflowed && j < s.len && s[j] == `}` {
+				if idx < args.len {
+					out.write_string(args[idx])
+				} else {
+					out.write_string(s[i..j + 1])
+				}
+				i = j + 1
+				continue
+			}
+			out.write_byte(ch)
+			i++
+			continue
+		}
+		if ch == `}` && i + 1 < s.len && s[i + 1] == `}` {
+			out.write_byte(`}`)
+			i += 2
+			continue
+		}
+		out.write_byte(ch)
+		i++
+	}
+	return out.str()
+}
+
+// replace_char replaces all occurrences of the character `rep`, with `repeat` x the character passed in `with`.
 // Example: assert '\tHello!'.replace_char(`\t`,` `,8) == '        Hello!'
 @[direct_array_access]
 pub fn (s string) replace_char(rep u8, with u8, repeat int) string {
@@ -545,10 +605,8 @@ pub fn (s string) replace_char(rep u8, with u8, repeat int) string {
 	}
 	// TODO: Allocating ints is expensive. Should be a stack array
 	// - string.replace()
-	mut idxs := []int{cap: s.len}
-	defer {
-		unsafe { idxs.free() }
-	}
+	mut idxs := []int{cap: s.len >> 2}
+	defer { unsafe { idxs.free() } }
 	// No need to do a contains(), it already traverses the entire string
 	for i, ch in s {
 		if ch == rep { // Found char? Mark its location
@@ -787,8 +845,9 @@ pub fn (s string) parse_int(_base int, _bit_size int) !i64 {
 @[direct_array_access]
 fn (s string) == (a string) bool {
 	if s.str == 0 {
-		// should never happen
-		panic('string.eq(): nil string')
+		// Nil string: equal only to another nil/empty string.
+		// This can happen with zero-initialized struct fields in the native backend.
+		return a.str == 0 || a.len == 0
 	}
 	if s.len != a.len {
 		return false
@@ -836,16 +895,47 @@ fn (s string) < (a string) bool {
 
 @[direct_array_access]
 fn (s string) + (a string) string {
-	new_len := a.len + s.len
+	slen := if s.len > 0 { s.len } else { 0 }
+	alen := if a.len > 0 { a.len } else { 0 }
+	new_len := alen + slen
 	mut res := string{
 		str: unsafe { malloc_noscan(new_len + 1) }
 		len: new_len
 	}
 	unsafe {
-		vmemcpy(res.str, s.str, s.len)
-		vmemcpy(res.str + s.len, a.str, a.len)
+		if slen > 0 {
+			vmemcpy(res.str, s.str, slen)
+		}
+		if alen > 0 {
+			vmemcpy(res.str + slen, a.str, alen)
+		}
+		res.str[new_len] = 0 // V strings are not null terminated, but just in case
 	}
+	return res
+}
+
+// string_plus_many concatenates several strings with a single allocation.
+@[direct_array_access; markused]
+fn string_plus_many(data_len int, input_base &string) string {
+	mut new_len := 0
+	for i := 0; i < data_len; i++ {
+		part := unsafe { input_base[i] }
+		new_len += if part.len > 0 { part.len } else { 0 }
+	}
+	mut res := string{
+		str: unsafe { malloc_noscan(new_len + 1) }
+		len: new_len
+	}
+	mut offset := 0
 	unsafe {
+		for i := 0; i < data_len; i++ {
+			part := input_base[i]
+			part_len := if part.len > 0 { part.len } else { 0 }
+			if part_len > 0 {
+				vmemcpy(res.str + offset, part.str, part_len)
+				offset += part_len
+			}
+		}
 		res.str[new_len] = 0 // V strings are not null terminated, but just in case
 	}
 	return res
@@ -854,17 +944,24 @@ fn (s string) + (a string) string {
 // for `s + s2 + s3`, an optimization (faster than string_plus(string_plus(s1, s2), s3))
 @[direct_array_access]
 fn (s string) plus_two(a string, b string) string {
-	new_len := a.len + b.len + s.len
+	slen := if s.len > 0 { s.len } else { 0 }
+	alen := if a.len > 0 { a.len } else { 0 }
+	blen := if b.len > 0 { b.len } else { 0 }
+	new_len := alen + blen + slen
 	mut res := string{
 		str: unsafe { malloc_noscan(new_len + 1) }
 		len: new_len
 	}
 	unsafe {
-		vmemcpy(res.str, s.str, s.len)
-		vmemcpy(res.str + s.len, a.str, a.len)
-		vmemcpy(res.str + s.len + a.len, b.str, b.len)
-	}
-	unsafe {
+		if slen > 0 {
+			vmemcpy(res.str, s.str, slen)
+		}
+		if alen > 0 {
+			vmemcpy(res.str + slen, a.str, alen)
+		}
+		if blen > 0 {
+			vmemcpy(res.str + slen + alen, b.str, blen)
+		}
 		res.str[new_len] = 0 // V strings are not null terminated, but just in case
 	}
 	return res
@@ -1001,7 +1098,6 @@ pub fn (s string) split_nth(delim string, nth int) []string {
 	mut res := []string{}
 	unsafe { res.flags.set(.noslices) } // allow freeing of old data during <<
 	defer { unsafe { res.flags.clear(.noslices) } }
-
 	match delim.len {
 		0 {
 			for i, ch in s {
@@ -1062,7 +1158,6 @@ pub fn (s string) rsplit_nth(delim string, nth int) []string {
 	mut res := []string{}
 	unsafe { res.flags.set(.noslices) } // allow freeing of old data during <<
 	defer { unsafe { res.flags.clear(.noslices) } }
-
 	match delim.len {
 		0 {
 			for i := s.len - 1; i >= 0; i-- {
@@ -1165,7 +1260,8 @@ pub fn (s string) split_by_space() []string {
 // Example: assert 'ABCD'.substr(1,3) == 'BC'
 @[direct_array_access]
 pub fn (s string) substr(start int, _end int) string {
-	end := if _end == max_int { s.len } else { _end } // max_int
+	// WARNNING: The is a temp solution for bootstrap!
+	end := if _end == max_i64 || _end == max_i32 { s.len } else { _end } // max_int
 	$if !no_bounds_checking {
 		if start > end || start > s.len || end > s.len || start < 0 || end < 0 {
 			panic('substr(' + impl_i64_to_string(start) + ', ' + impl_i64_to_string(end) +
@@ -1201,11 +1297,23 @@ pub fn (s string) substr_unsafe(start int, _end int) string {
 	}
 }
 
+// substr_or returns substr(start, end) if bounds are valid, otherwise returns fallback.
+// Used by the native backend for `s[start..end] or { fallback }` expressions.
+@[direct_array_access]
+pub fn (s string) substr_or(start int, _end int, fallback string) string {
+	end := if _end == max_i64 || _end == max_i32 { s.len } else { _end }
+	if start < 0 || start > end || end > s.len {
+		return fallback
+	}
+	return s.substr(start, end)
+}
+
 // version of `substr()` that is used in `a[start..end] or {`
 // return an error when the index is out of range
 @[direct_array_access]
 pub fn (s string) substr_with_check(start int, _end int) !string {
-	end := if _end == max_int { s.len } else { _end } // max_int
+	// WARNNING: The is a temp solution for bootstrap!
+	end := if _end == max_i64 || _end == max_i32 { s.len } else { _end } // max_int
 	if start > end || start > s.len || end > s.len || start < 0 || end < 0 {
 		return error('substr(' + impl_i64_to_string(start) + ', ' + impl_i64_to_string(end) +
 			') out of bounds (len=' + impl_i64_to_string(s.len) + ')')
@@ -1230,7 +1338,8 @@ pub fn (s string) substr_with_check(start int, _end int) !string {
 @[direct_array_access]
 pub fn (s string) substr_ni(_start int, _end int) string {
 	mut start := _start
-	mut end := if _end == max_int { s.len } else { _end } // max_int
+	// WARNNING: The is a temp solution for bootstrap!
+	mut end := if _end == max_i64 || _end == max_i32 { s.len } else { _end }
 
 	// borders math
 	if start < 0 {
@@ -1268,11 +1377,11 @@ pub fn (s string) substr_ni(_start int, _end int) string {
 	return res
 }
 
-// index returns the position of the first character of the input string.
+// index_ returns the position of the first character of the input string.
 // It will return `-1` if the input string can't be found.
 @[direct_array_access]
-fn (s string) index_(p string) int {
-	if p.len > s.len || p.len == 0 {
+pub fn (s string) index_(p string) int {
+	if p.len > s.len || p.len == 0 || u64(s.str) <= 0xFFFF || u64(p.str) <= 0xFFFF {
 		return -1
 	}
 	if p.len > 2 {
@@ -1575,7 +1684,7 @@ pub fn (s string) contains_any_substr(substrs []string) bool {
 // starts_with returns `true` if the string starts with `p`.
 @[direct_array_access]
 pub fn (s string) starts_with(p string) bool {
-	if p.len > s.len {
+	if p.len > s.len || u64(s.str) <= 0xFFFF || u64(p.str) <= 0xFFFF {
 		return false
 	} else if unsafe { vmemcmp(s.str, p.str, p.len) == 0 } {
 		return true
@@ -1586,7 +1695,7 @@ pub fn (s string) starts_with(p string) bool {
 // ends_with returns `true` if the string ends with `p`.
 @[direct_array_access]
 pub fn (s string) ends_with(p string) bool {
-	if p.len > s.len {
+	if p.len > s.len || u64(s.str) <= 0xFFFF || u64(p.str) <= 0xFFFF {
 		return false
 	} else if unsafe { vmemcmp(s.str + s.len - p.len, p.str, p.len) == 0 } {
 		return true
@@ -1678,21 +1787,26 @@ pub fn (s string) to_upper() string {
 	return runes.string()
 }
 
-// is_upper returns `true` if all characters in the string are uppercase.
+// is_upper returns `true` if all ASCII letters in the string are uppercase,
+// and the string contains at least one uppercase ASCII letter.
 // It only works when the input is composed entirely from ASCII characters.
 // See also: [`byte.is_capital`](#byte.is_capital)
 // Example: assert 'HELLO V'.is_upper() == true
 @[direct_array_access]
 pub fn (s string) is_upper() bool {
-	if s == '' || s[0].is_digit() {
+	if s == '' {
 		return false
 	}
+	mut has_upper := false
 	for i in 0 .. s.len {
 		if s[i] >= `a` && s[i] <= `z` {
 			return false
 		}
+		if s[i] >= `A` && s[i] <= `Z` {
+			has_upper = true
+		}
 	}
-	return true
+	return has_upper
 }
 
 // capitalize returns the string with the first character capitalized.
@@ -1907,13 +2021,14 @@ fn (s string) trim_chars(cutset string, mode TrimMode) string {
 @[direct_array_access]
 fn (s string) trim_runes(cutset string, mode TrimMode) string {
 	s_runes := s.runes()
+	cs_runes := cutset.runes()
 	mut pos_left := 0
 	mut pos_right := s_runes.len - 1
 	mut cs_match := true
 	for pos_left <= s_runes.len && pos_right >= -1 && cs_match {
 		cs_match = false
 		if mode in [.trim_left, .trim_both] {
-			for cs in cutset.runes_iterator() {
+			for cs in cs_runes {
 				if s_runes[pos_left] == cs {
 					pos_left++
 					cs_match = true
@@ -1922,7 +2037,7 @@ fn (s string) trim_runes(cutset string, mode TrimMode) string {
 			}
 		}
 		if mode in [.trim_right, .trim_both] {
-			for cs in cutset.runes_iterator() {
+			for cs in cs_runes {
 				if s_runes[pos_right] == cs {
 					pos_right--
 					cs_match = true
@@ -1957,6 +2072,29 @@ pub fn (s string) trim_left(cutset string) string {
 pub fn (s string) trim_right(cutset string) string {
 	if s.len < 1 || cutset.len < 1 {
 		return s.clone()
+	}
+	if cutset.len == 1 {
+		cut := cutset[0]
+		mut pos_right := s.len - 1
+		for pos_right >= 0 && s[pos_right] == cut {
+			pos_right--
+		}
+		if pos_right < 0 {
+			return ''
+		}
+		return s.substr(0, pos_right + 1)
+	}
+	if cutset.len == 2 && cutset.is_pure_ascii() {
+		cut0 := cutset[0]
+		cut1 := cutset[1]
+		mut pos_right := s.len - 1
+		for pos_right >= 0 && (s[pos_right] == cut0 || s[pos_right] == cut1) {
+			pos_right--
+		}
+		if pos_right < 0 {
+			return ''
+		}
+		return s.substr(0, pos_right + 1)
 	}
 	if cutset.is_pure_ascii() {
 		return s.trim_chars(cutset, .trim_right)
@@ -2037,6 +2175,32 @@ fn (s string) at(idx int) u8 {
 	return unsafe { s.str[idx] }
 }
 
+@[markused]
+fn (s string) at_i64(idx i64) u8 {
+	$if !no_bounds_checking {
+		if idx < 0 || idx >= i64(s.len) {
+			panic_n2('string index out of range(idx,s.len):', idx, s.len)
+		}
+	}
+	return unsafe { s.str[int(idx)] }
+}
+
+@[markused]
+fn (s string) at_u64(idx u64) u8 {
+	$if !no_bounds_checking {
+		if idx >= u64(s.len) {
+			panic('string index out of range(idx,s.len): ' + idx.str() + ', ' +
+				impl_i64_to_string(s.len))
+		}
+	}
+	return unsafe { s.str[int(idx)] }
+}
+
+@[markused]
+fn (s string) at_ni(idx int) u8 {
+	return s.at(v_ni_index(idx, s.len))
+}
+
 // version of `at()` that is used in `a[i] or {`
 // return an error when the index is out of range
 fn (s string) at_with_check(idx int) ?u8 {
@@ -2046,6 +2210,31 @@ fn (s string) at_with_check(idx int) ?u8 {
 	unsafe {
 		return s.str[idx]
 	}
+}
+
+@[markused]
+fn (s string) at_with_check_i64(idx i64) ?u8 {
+	if idx < 0 || idx >= i64(s.len) {
+		return none
+	}
+	unsafe {
+		return s.str[int(idx)]
+	}
+}
+
+@[markused]
+fn (s string) at_with_check_u64(idx u64) ?u8 {
+	if idx >= u64(s.len) {
+		return none
+	}
+	unsafe {
+		return s.str[int(idx)]
+	}
+}
+
+@[markused]
+fn (s string) at_with_check_ni(idx int) ?u8 {
+	return s.at_with_check(v_ni_index(idx, s.len))
 }
 
 // Check if a string is an octal value. Returns 'true' if it is, or 'false' if it is not
@@ -2170,8 +2359,8 @@ pub fn (str string) is_hex() bool {
 	for i < str.len {
 		// TODO: remove this workaround for v2's parser
 		// vfmt off
-		if (str[i] < `0` || str[i] > `9`) && 
-		    ((str[i] < `a` || str[i] > `f`) && (str[i] < `A` || str[i] > `F`)) {
+		if (str[i] < `0` || str[i] > `9`)
+		    && ((str[i] < `a` || str[i] > `f`) && (str[i] < `A` || str[i] > `F`)) {
 			return false
 		}
 		// vfmt on
@@ -2286,6 +2475,7 @@ pub fn (s &string) free() {
 		free(s.str)
 		s.str = nil
 	}
+	s.len = 0
 	s.is_lit = -98761234
 }
 
@@ -2639,12 +2829,12 @@ pub fn (s string) strip_margin_custom(del u8) string {
 pub fn (s string) trim_indent() string {
 	mut lines := s.split_into_lines()
 
-	lines_indents := lines
-		.filter(!it.is_blank())
-		.map(it.indent_width())
-
 	mut min_common_indent := int(max_int) // max int
-	for line_indent in lines_indents {
+	for line in lines {
+		if line.is_blank() {
+			continue
+		}
+		line_indent := line.indent_width()
 		if line_indent < min_common_indent {
 			min_common_indent = line_indent
 		}
@@ -2755,42 +2945,25 @@ pub fn (name string) match_glob(pattern string) bool {
 				`[` {
 					if nx < nlen {
 						wanted_c := name[nx]
-						mut bstart := px
 						mut is_inverted := false
 						mut inner_match := false
-						mut inner_idx := bstart + 1
-						mut inner_c := 0
-						if inner_idx < plen {
-							inner_c = pattern[inner_idx]
-							if inner_c == `^` {
-								is_inverted = true
-								inner_idx++
-							}
+						mut inner_idx := px + 1
+						if inner_idx < plen && pattern[inner_idx] == `^` {
+							is_inverted = true
+							inner_idx++
 						}
-						for ; inner_idx < plen; inner_idx++ {
-							inner_c = pattern[inner_idx]
-							if inner_c == `]` {
-								break
-							}
-							if inner_c == wanted_c {
+						for ; inner_idx < plen && pattern[inner_idx] != `]`; inner_idx++ {
+							if pattern[inner_idx] == wanted_c {
 								inner_match = true
-								for px < plen && pattern[px] != `]` {
-									px++
-								}
-								break
 							}
 						}
-						if is_inverted {
-							if inner_match {
-								return false
-							} else {
-								px = inner_idx
-							}
+						if inner_idx < plen && ((inner_match && !is_inverted)
+							|| (!inner_match && is_inverted)) {
+							px = inner_idx + 1
+							nx++
+							continue
 						}
 					}
-					px++
-					nx++
-					continue
 				}
 				else {
 					// an ordinary character
@@ -2847,7 +3020,9 @@ pub fn (s string) is_identifier() bool {
 // Example: assert 'Abcd'.camel_to_snake() == 'abcd'
 // Example: assert 'aaBB'.camel_to_snake() == 'aa_bb'
 // Example: assert 'BBaa'.camel_to_snake() == 'bb_aa'
-// Example: assert 'aa_BB'.camel_to_snake() == 'aa_bb'
+// Example: assert 'HTTPServer'.camel_to_snake() == 'http_server'
+// Example: assert 'HTTP2Server'.camel_to_snake() == 'http2_server'
+// Example: assert 'XML2JSON'.camel_to_snake() == 'xml_2_json'
 @[direct_array_access]
 pub fn (s string) camel_to_snake() string {
 	if s.len == 0 {
@@ -2861,6 +3036,7 @@ pub fn (s string) camel_to_snake() string {
 	// handle the first two chars separately to reduce load.
 	mut pos := 2
 	mut prev_is_upper := false
+	mut prev_inserted_boundary := false
 	unsafe {
 		if s[0].is_capital() {
 			b[0] = s[0] + 32
@@ -2887,14 +3063,31 @@ pub fn (s string) camel_to_snake() string {
 		}
 	}
 	for i := 2; i < s.len; i++ {
+		mut has_boundary_before_upper := false
 		c := s[i]
 		c_is_upper := c.is_capital()
+		c_is_number := c.is_digit()
+		next_is_lower := i + 1 < s.len && s[i + 1].is_letter() && !s[i + 1].is_capital()
+		next2_is_lower := i + 2 < s.len && s[i + 2].is_letter() && !s[i + 2].is_capital()
+		// Cases: `XML2JSON == xml_2_json` || `HTTP2Server == http2_server`
+		skip_digit := c_is_number && prev_is_upper && !next_is_lower && next2_is_lower
+		// Cases: `HTTPServer == http_server` || `getHTTPSUrl == get_https_url`
+		if c_is_upper && prev_is_upper && i >= 2 && s[i - 2].is_capital() && next_is_lower
+			&& c != `_` {
+			unsafe {
+				if b[pos - 1] != `_` {
+					b[pos] = `_`
+					pos++
+				}
+			}
+			has_boundary_before_upper = true
+		}
 		// Cases: `aBcd == a_bcd` || `ABcd == ab_cd`
 		// TODO: remove this workaround for v2's parser
 		// vfmt off
 		if ((c_is_upper && !prev_is_upper) ||
-			(!c_is_upper && prev_is_upper && s[i - 2].is_capital())) && 
-			c != `_` {
+			(!c_is_upper && prev_is_upper && s[i - 2].is_capital() && !prev_inserted_boundary && !skip_digit))
+			&& c != `_` {
 			unsafe {
 				if b[pos - 1] != `_` {
 					b[pos] = `_`
@@ -2908,6 +3101,7 @@ pub fn (s string) camel_to_snake() string {
 			b[pos] = lower_c
 		}
 		prev_is_upper = c_is_upper
+		prev_inserted_boundary = has_boundary_before_upper
 		pos++
 	}
 	unsafe {
@@ -2997,7 +3191,7 @@ pub fn (s string) hex() string {
 	if s == '' {
 		return ''
 	}
-	return unsafe { data_to_hex_string(&u8(s.str), s.len) }
+	return unsafe { data_to_hex_string(s.str, s.len) }
 }
 
 @[unsafe]
@@ -3035,20 +3229,10 @@ pub fn (s string) runes_iterator() RunesIterator {
 
 // next is the method that will be called for each iteration in `for r in s.runes_iterator() {` .
 pub fn (mut ri RunesIterator) next() ?rune {
-	for ri.i >= ri.s.len {
+	if ri.i >= ri.s.len {
 		return none
 	}
-	char_len := utf8_char_len(unsafe { ri.s.str[ri.i] })
-	if char_len == 1 {
-		res := unsafe { ri.s.str[ri.i] }
-		ri.i++
-		return res
-	}
-	start := &u8(unsafe { &ri.s.str[ri.i] })
-	len := if ri.s.len - 1 >= ri.i + char_len { char_len } else { ri.s.len - ri.i }
-	ri.i += char_len
-	if char_len > 4 {
-		return 0
-	}
-	return rune(impl_utf8_to_utf32(start, len))
+	r, char_len := utf8_decode_rune(unsafe { &ri.s.str[ri.i] }, ri.s.len - ri.i)
+	ri.i += if char_len > 0 { char_len } else { 1 }
+	return r
 }

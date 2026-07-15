@@ -104,6 +104,7 @@ fn should_escape(c u8, mode EncodingMode) bool {
 		}
 		else {}
 	}
+
 	if mode == .encode_fragment {
 		// RFC 3986 §2.2 allows not escaping sub-delims. A subset of sub-delims are
 		// included in reserved from RFC 2396 §2.2. The remaining sub-delims do not
@@ -317,14 +318,14 @@ fn escape(s string, mode EncodingMode) string {
 pub struct URL {
 pub mut:
 	scheme      string
-	opaque      string // encoded opaque data
-	user        &Userinfo = unsafe { nil } // username and password information
-	host        string // host or host:port
-	path        string // path (relative paths may omit leading slash)
-	raw_path    string // encoded path hint (see escaped_path method)
-	force_query bool   // append a query ('?') even if raw_query is empty
-	raw_query   string // encoded query values, without '?'
-	fragment    string // fragment for references, without '#'
+	opaque      string    // encoded opaque data
+	user        ?Userinfo // username and password information
+	host        string    // host or host:port
+	path        string    // path (relative paths may omit leading slash)
+	raw_path    string    // encoded path hint (see escaped_path method)
+	force_query bool      // append a query ('?') even if raw_query is empty
+	raw_query   string    // encoded query values, without '?'
+	fragment    string    // fragment for references, without '#'
 }
 
 // debug returns a string representation of *ALL* the fields of the given URL
@@ -334,8 +335,8 @@ pub fn (url &URL) debug() string {
 
 // user returns a Userinfo containing the provided username
 // and no password set.
-pub fn user(username string) &Userinfo {
-	return &Userinfo{
+pub fn user(username string) Userinfo {
+	return Userinfo{
 		username:     username
 		password:     ''
 		password_set: false
@@ -350,28 +351,28 @@ pub fn user(username string) &Userinfo {
 // ``is NOT RECOMMENDED, because the passing of authentication
 // information in clear text (such as URI) has proven to be a
 // security risk in almost every case where it has been used.''
-fn user_password(username string, password string) &Userinfo {
-	return &Userinfo{username, password, true}
+fn user_password(username string, password string) Userinfo {
+	return Userinfo{username, password, true}
 }
 
 // The Userinfo type is an immutable encapsulation of username and
 // password details for a URL. An existing Userinfo value is guaranteed
 // to have a username set (potentially empty, as allowed by RFC 2396),
 // and optionally a password.
-struct Userinfo {
+pub struct Userinfo {
 pub:
 	username     string
 	password     string
 	password_set bool
 }
 
-fn (u &Userinfo) empty() bool {
-	return isnil(u) || (u.username == '' && u.password == '')
+fn (u Userinfo) empty() bool {
+	return u.username == '' && u.password == ''
 }
 
 // string returns the encoded userinfo information in the standard form
 // of 'username[:password]'.
-fn (u &Userinfo) str() string {
+fn (u Userinfo) str() string {
 	if u.empty() {
 		return ''
 	}
@@ -409,8 +410,8 @@ fn split_by_scheme(rawurl string) ![]string {
 }
 
 fn get_scheme(rawurl string) !string {
-	split := split_by_scheme(rawurl) or { return err.msg() }
-	return split[0]
+	parts := split_by_scheme(rawurl) or { return err.msg() }
+	return parts[0]
 }
 
 // split slices s into two substrings separated by the first occurrence of
@@ -449,12 +450,12 @@ pub fn parse(rawurl string) !URL {
 	return url
 }
 
-// parse_request_uri parses rawurl into a URL structure. It assumes that
-// rawurl was received in an HTTP request, so the rawurl is interpreted
-// only as an absolute URI or an absolute path.
+// parse_request_uri parses rawurl into a URL structure for an HTTP request.
+// It accepts only absolute URIs or absolute paths and preserves leading `//`
+// sequences as part of the path for request targets.
 // The string rawurl is assumed not to have a #fragment suffix.
 // (Web browsers strip #fragment before sending the URL to a web server.)
-fn parse_request_uri(rawurl string) !URL {
+pub fn parse_request_uri(rawurl string) !URL {
 	return parse_url(rawurl, true)
 }
 
@@ -471,7 +472,7 @@ fn parse_url(rawurl string, via_request bool) !URL {
 		return error(error_msg('parse_url: empty URL', rawurl))
 	}
 	mut url := URL{
-		user: unsafe { nil }
+		user: none
 	}
 	if rawurl == '*' {
 		url.path = '*'
@@ -533,7 +534,7 @@ fn parse_url(rawurl string, via_request bool) !URL {
 }
 
 struct ParseAuthorityRes {
-	user &Userinfo
+	user ?Userinfo
 	host string
 }
 
@@ -574,8 +575,7 @@ fn parse_host(host string) !string {
 		}
 		mut colon_port := host[i + 1..]
 		if !valid_optional_port(colon_port) {
-			return error(error_msg('parse_host: invalid port ${colon_port} after host ',
-				''))
+			return error(error_msg('parse_host: invalid port ${colon_port} after host ', ''))
 		}
 		// RFC 6874 defines that %25 (%-encoded percent) introduces
 		// the zone identifier, and the zone identifier can use basically
@@ -594,8 +594,7 @@ fn parse_host(host string) !string {
 		if i != -1 {
 			colon_port := host[i..]
 			if !valid_optional_port(colon_port) {
-				return error(error_msg('parse_host: invalid port ${colon_port} after host ',
-					''))
+				return error(error_msg('parse_host: invalid port ${colon_port} after host ', ''))
 			}
 		}
 	}
@@ -697,7 +696,7 @@ fn valid_optional_port(port string) bool {
 //
 // In the second form, the following rules apply:
 // - if u.scheme is empty, scheme: is omitted.
-// - if u.user is nil, userinfo@ is omitted.
+// - if u.user is none, userinfo@ is omitted.
 // - if u.host is empty, host/ is omitted.
 // - if u.scheme and u.host are empty and u.user is nil,
 // the entire scheme://userinfo@host/ is omitted.
@@ -714,12 +713,13 @@ pub fn (u URL) str() string {
 	if u.opaque != '' {
 		buf.write_string(u.opaque)
 	} else {
-		if u.scheme != '' || u.host != '' || !u.user.empty() {
-			if u.host != '' || u.path != '' || !u.user.empty() {
+		userinfo := u.user or { Userinfo{} }
+		if u.scheme != '' || u.host != '' || !userinfo.empty() {
+			if u.host != '' || u.path != '' || !userinfo.empty() {
 				buf.write_string('//')
 			}
-			if !u.user.empty() {
-				buf.write_string(u.user.str())
+			if !userinfo.empty() {
+				buf.write_string(userinfo.str())
 				buf.write_string('@')
 			}
 			if u.host != '' {
@@ -921,7 +921,8 @@ pub fn (u &URL) resolve_reference(ref &URL) !URL {
 	if ref.scheme == '' {
 		url.scheme = u.scheme
 	}
-	if ref.scheme != '' || ref.host != '' || !ref.user.empty() {
+	ref_user := ref.user or { Userinfo{} }
+	if ref.scheme != '' || ref.host != '' || !ref_user.empty() {
 		// The 'absoluteURI' or 'net_path' cases.
 		// We can ignore the error from set_path since we know we provided a
 		// validly-escaped path.

@@ -38,6 +38,7 @@ pub mut:
 // new_suggestion creates a new Suggestion, given a wanted value and a list of possibilities.
 pub fn new_suggestion(wanted string, possibilities []string, params SuggestionParams) Suggestion {
 	mut s := Suggestion{
+		known:                []Possibility{cap: int(max_suggestions_limit)}
 		wanted:               wanted
 		swanted:              short_module_name(wanted)
 		similarity_threshold: params.similarity_threshold
@@ -48,9 +49,14 @@ pub fn new_suggestion(wanted string, possibilities []string, params SuggestionPa
 	return s
 }
 
+const max_suggestions_limit = $d('max_suggestions_limit', 200)
+
 // add adds the `val` to the list of known possibilities of the suggestion.
 // It calculates the similarity metric towards the wanted value.
 pub fn (mut s Suggestion) add(val string) {
+	if s.known.len >= max_suggestions_limit {
+		return
+	}
 	if val in [s.wanted, s.swanted] {
 		return
 	}
@@ -70,6 +76,9 @@ pub fn (mut s Suggestion) add(val string) {
 // add adds all of the `many` to the list of known possibilities of the suggestion
 pub fn (mut s Suggestion) add_many(many []string) {
 	for x in many {
+		if s.known.len >= max_suggestions_limit {
+			break
+		}
 		s.add(x)
 	}
 }

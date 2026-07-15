@@ -7,6 +7,10 @@ $if linux {
 	#include <alsa/asoundlib.h> # Please install the `libasound2-dev` package
 }
 
+$if openbsd {
+	$compile_error('sokol/audio not supported on OpenBSD')
+}
+
 #flag -I @VEXEROOT/thirdparty/sokol
 // FreeBSD requires the audio/alsa-lib to be installed
 #flag freebsd -I/usr/local/include
@@ -83,7 +87,7 @@ pub mut:
 // | buffer_frames | 2048     | buffer size in frames, larger is more latency, smaller means higher CPU |
 // | packet_frames | 128      | push model only, number of frames that will be pushed in each packet |
 // | num_packets   | 64       | for push model only, number of packets in the backend ringbuffer |
-@[typedef]
+@[params; typedef]
 pub struct C.saudio_desc {
 pub:
 	sample_rate        int
@@ -99,7 +103,7 @@ pub mut:
 	logger    C.saudio_logger
 }
 
-fn C.saudio_setup(desc &C.saudio_desc)
+fn C.saudio_setup(const_desc &C.saudio_desc)
 
 fn C.saudio_shutdown()
 
@@ -109,17 +113,17 @@ fn C.saudio_userdata() voidptr
 
 fn C.saudio_query_desc() C.saudio_desc
 
-fn C.saudio_sample_rate() int
+fn C.saudio_sample_rate() i32
 
-fn C.saudio_buffer_frames() int
+fn C.saudio_buffer_frames() i32
 
-fn C.saudio_channels() int
+fn C.saudio_channels() i32
 
 fn C.saudio_suspended() bool
 
-fn C.saudio_expect() int
+fn C.saudio_expect() i32
 
-fn C.saudio_push(frames &f32, num_frames int) int
+fn C.saudio_push(const_frames &f32, num_frames i32) i32
 
 // setup - setup sokol-audio
 pub fn setup(desc &C.saudio_desc) {
@@ -205,7 +209,7 @@ pub fn fclamp(x f32, flo f32, fhi f32) f32 {
 // min - helper function to return the smaller of two numbers
 //
 // NOTE: math.min returns `f32` values, this returns `int` values
-// Example: smaller := audio.min(1, 5) // smaller == 1
+// Example: println(audio.min(1, 5))
 pub fn min(x int, y int) int {
 	if x < y {
 		return x
@@ -216,7 +220,7 @@ pub fn min(x int, y int) int {
 // max - helper function to return the larger of two numbers
 //
 // NOTE: math.max returns `f32` values, this returns `int` values
-// Example: larger := audio.max(1, 5) // larger == 5
+// Example: println(audio.max(1, 5))
 pub fn max(x int, y int) int {
 	if x < y {
 		return y

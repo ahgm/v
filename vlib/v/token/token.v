@@ -8,14 +8,14 @@ const orm_custom_operators = ['like', 'ilike']
 @[minify]
 pub struct Token {
 pub:
-	kind    Kind   // the token number/enum; for quick comparisons
-	lit     string // literal representation of the token
-	line_nr int    // the line number in the source where the token occurred
-	col     int    // the column in the source where the token occurred
-	// name_idx int // name table index for O(1) lookup
-	pos  int // the position of the token in scanner text
-	len  int // length of the literal
-	tidx int // the index of the token
+	kind     Kind   // the token number/enum; for quick comparisons
+	lit      string // literal representation of the token
+	line_nr  int    // the line number in the source where the token occurred
+	col      u16    // the column in the source where the token occurred
+	file_idx i16    // file idx in the global table `filelist`
+	pos      int    // the position of the token in scanner text
+	len      int    // length of the literal
+	tidx     int    // the index of the token
 }
 
 pub enum Kind {
@@ -24,11 +24,12 @@ pub enum Kind {
 	name       // user
 	number     // 123
 	string     // 'foo'
-	str_inter  // 'name=$user.name'
+	str_inter  // 'name=${user.name}'
 	chartoken  // `A` - rune
 	plus       // +
 	minus      // -
 	mul        // *
+	power      // **
 	div        // /
 	mod        // %
 	xor        // ^
@@ -60,6 +61,7 @@ pub enum Kind {
 	minus_assign                // -=
 	div_assign                  // /=
 	mult_assign                 // *=
+	power_assign                // **=
 	xor_assign                  // ^=
 	mod_assign                  // %=
 	or_assign                   // |=
@@ -196,8 +198,9 @@ pub enum AtKind {
 }
 
 pub const assign_tokens = [Kind.assign, .decl_assign, .plus_assign, .minus_assign, .mult_assign,
-	.div_assign, .xor_assign, .mod_assign, .or_assign, .and_assign, .right_shift_assign,
-	.left_shift_assign, .unsigned_right_shift_assign, .boolean_and_assign, .boolean_or_assign]
+	.power_assign, .div_assign, .xor_assign, .mod_assign, .or_assign, .and_assign,
+	.right_shift_assign, .left_shift_assign, .unsigned_right_shift_assign, .boolean_and_assign,
+	.boolean_or_assign]
 
 pub const valid_at_tokens = ['@VROOT', '@VMODROOT', '@VEXEROOT', '@FN', '@METHOD', '@MOD', '@STRUCT',
 	'@VEXE', '@FILE', '@DIR', '@LINE', '@COLUMN', '@VHASH', '@VCURRENTHASH', '@VMOD_FILE',
@@ -212,6 +215,7 @@ pub const scanner_matcher = new_keywords_matcher_trie[Kind](keywords)
 
 // build_keys generates a map with keywords' string values:
 // Keywords['return'] == .key_return
+@[direct_array_access]
 fn build_keys() map[string]Kind {
 	mut res := map[string]Kind{}
 	for t in int(Kind.keyword_beg) + 1 .. int(Kind.keyword_end) {
@@ -228,6 +232,7 @@ fn build_keys() map[string]Kind {
 }
 
 // TODO: remove once we have `enum Kind { name('name') if('if') ... }`
+@[direct_array_access]
 fn build_token_str() []string {
 	mut s := []string{len: int(Kind._end_)}
 	s[Kind.unknown] = 'unknown'
@@ -239,6 +244,7 @@ fn build_token_str() []string {
 	s[Kind.plus] = '+'
 	s[Kind.minus] = '-'
 	s[Kind.mul] = '*'
+	s[Kind.power] = '**'
 	s[Kind.div] = '/'
 	s[Kind.mod] = '%'
 	s[Kind.xor] = '^'
@@ -265,6 +271,7 @@ fn build_token_str() []string {
 	s[Kind.plus_assign] = '+='
 	s[Kind.minus_assign] = '-='
 	s[Kind.mult_assign] = '*='
+	s[Kind.power_assign] = '**='
 	s[Kind.div_assign] = '/='
 	s[Kind.xor_assign] = '^='
 	s[Kind.mod_assign] = '%='
@@ -381,7 +388,7 @@ pub fn (t Kind) is_assign() bool {
 }
 
 // note: used for some code generation, so no quoting
-@[inline]
+@[direct_array_access; inline]
 pub fn (t Kind) str() string {
 	idx := int(t)
 	if idx < 0 || token_str.len <= idx {
@@ -395,10 +402,12 @@ pub fn (t Token) is_next_to(pre_token Token) bool {
 	return t.pos - pre_token.pos == pre_token.len
 }
 
+@[inline]
 pub fn (t Token) is_key() bool {
 	return int(t.kind) > int(Kind.keyword_beg) && int(t.kind) < int(Kind.keyword_end)
 }
 
+@[direct_array_access]
 pub fn (t Token) str() string {
 	mut s := t.kind.str()
 	if s.len == 0 {
@@ -435,12 +444,14 @@ pub enum Precedence {
 	product // * / << >> >>> &
 	// mod // %
 	prefix  // -X or !X; TODO: seems unused
+	power   // **
 	postfix // ++ or --
 	call    // func(X) or foo.method(X)
 	index   // array[index], map[key]
 	highest
 }
 
+@[direct_array_access]
 pub fn build_precedences() []Precedence {
 	mut p := []Precedence{len: int(Kind._end_), init: Precedence.lowest}
 	p[Kind.lsbr] = .index
@@ -459,6 +470,7 @@ pub fn build_precedences() []Precedence {
 	p[Kind.unsigned_right_shift] = .product
 	p[Kind.amp] = .product
 	p[Kind.arrow] = .product
+	p[Kind.power] = .power
 	// `+` |  `-` |  `|` | `^`
 	p[Kind.plus] = .sum
 	p[Kind.minus] = .sum
@@ -477,6 +489,7 @@ pub fn build_precedences() []Precedence {
 	p[Kind.assign] = .assign
 	p[Kind.plus_assign] = .assign
 	p[Kind.minus_assign] = .assign
+	p[Kind.power_assign] = .assign
 	p[Kind.div_assign] = .assign
 	p[Kind.mod_assign] = .assign
 	p[Kind.or_assign] = .assign
@@ -544,8 +557,8 @@ pub fn (kind Kind) is_prefix() bool {
 
 @[inline]
 pub fn (kind Kind) is_infix() bool {
-	return kind in [.plus, .minus, .mod, .mul, .div, .eq, .ne, .gt, .lt, .key_in, .key_as, .ge,
-		.le, .logical_or, .xor, .not_in, .key_is, .not_is, .and, .dot, .pipe, .amp, .left_shift,
+	return kind in [.plus, .minus, .mod, .mul, .power, .div, .eq, .ne, .gt, .lt, .key_in, .key_as,
+		.ge, .le, .logical_or, .xor, .not_in, .key_is, .not_is, .and, .dot, .pipe, .amp, .left_shift,
 		.right_shift, .unsigned_right_shift, .arrow, .key_like, .key_ilike]
 }
 
@@ -566,6 +579,7 @@ pub fn kind_to_string(k Kind) string {
 		.plus { 'plus' }
 		.minus { 'minus' }
 		.mul { 'mul' }
+		.power { 'power' }
 		.div { 'div' }
 		.mod { 'mod' }
 		.xor { 'xor' }
@@ -597,6 +611,7 @@ pub fn kind_to_string(k Kind) string {
 		.minus_assign { 'minus_assign' }
 		.div_assign { 'div_assign' }
 		.mult_assign { 'mult_assign' }
+		.power_assign { 'power_assign' }
 		.xor_assign { 'xor_assign' }
 		.mod_assign { 'mod_assign' }
 		.or_assign { 'or_assign' }
@@ -686,6 +701,7 @@ pub fn assign_op_to_infix_op(op Kind) Kind {
 		.plus_assign { .plus }
 		.minus_assign { .minus }
 		.mult_assign { .mul }
+		.power_assign { .power }
 		.div_assign { .div }
 		.xor_assign { .xor }
 		.mod_assign { .mod }

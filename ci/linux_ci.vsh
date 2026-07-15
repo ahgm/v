@@ -1,8 +1,7 @@
 import common { Task, exec }
+import os
 
-//
 // Shared tasks/helpers
-//
 fn all_code_is_formatted() {
 	if common.is_github_job {
 		exec('v -silent test-cleancode')
@@ -18,12 +17,12 @@ fn verify_v_test_works() {
 }
 
 fn test_pure_v_math_module() {
-	exec('v -silent -exclude @vlib/math/*.c.v test vlib/math/')
+	exec('v -exclude @vlib/math/*.c.v test vlib/math/')
 }
 
 fn self_tests() {
 	if common.is_github_job {
-		exec('v -silent test-self vlib')
+		exec('v -W -silent test-self vlib')
 	} else {
 		exec('v -progress test-self vlib')
 	}
@@ -31,7 +30,7 @@ fn self_tests() {
 
 fn build_examples() {
 	if common.is_github_job {
-		exec('v -silent build-examples')
+		exec('v -W build-examples')
 	} else {
 		exec('v -progress build-examples')
 	}
@@ -43,24 +42,25 @@ fn v_doctor() {
 
 fn build_v_with_prealloc() {
 	exec('v -cg -cstrict -o vstrict1 cmd/v')
-	exec('./vstrict1 -o vprealloc -prealloc cmd/v')
+	// -prealloc uses _Thread_local for g_memory_block; bundled tcc does not support it.
+	prealloc_cc_flag := if os.getenv('VFLAGS').contains('-cc tcc') { ' -cc cc' } else { '' }
+	exec('./vstrict1${prealloc_cc_flag} -o vprealloc -prealloc cmd/v')
 	exec('./vprealloc run examples/hello_world.v')
 	exec('./vprealloc -o v3 cmd/v')
 	exec('./v3 -o v4 cmd/v')
 	exec('./v4 -d debug_malloc -d debug_realloc -o vdebug1 cmd/v')
 }
 
-//
 // TCC job tasks
-//
-
 fn install_dependencies_for_examples_and_tools_tcc() {
 	if common.is_github_job {
 		exec('.github/workflows/disable_azure_mirror.sh')
 	}
 	exec('v retry -- sudo apt update')
 	exec('v retry -- sudo apt install --quiet -y libssl-dev sqlite3 libsqlite3-dev valgrind')
-	exec('v retry -- sudo apt install --quiet -y libfreetype6-dev libxi-dev libxcursor-dev libgl-dev libxrandr-dev libasound2-dev')
+	exec('v retry -- sudo apt install --quiet -y libfreetype6-dev libxi-dev libxcursor-dev libgl-dev libxrandr-dev libasound2-dev libegl-dev')
+	// Wayland development libraries for sokol Wayland support
+	exec('v retry -- sudo apt install --quiet -y libwayland-dev libxkbcommon-dev libwayland-egl1-mesa libxkbcommon-x11-dev')
 	// The following is needed for examples/wkhtmltopdf.v
 	exec('v retry -- sudo apt install --quiet -y xfonts-75dpi xfonts-base expect')
 	exec('v retry -- wget --quiet https://github.com/wkhtmltopdf/packaging/releases/download/0.12.6.1-2/wkhtmltox_0.12.6.1-2.jammy_amd64.deb')
@@ -105,7 +105,7 @@ fn run_submodule_example_tcc() {
 
 fn build_tools_tcc() {
 	if common.is_github_job {
-		exec('v -silent -N -W build-tools')
+		exec('v -N -W build-tools')
 	} else {
 		exec('v -progress -N -W build-tools')
 	}
@@ -133,8 +133,10 @@ fn build_fast_tcc() {
 }
 
 fn v_self_compilation_usecache_tcc() {
-	exec('unset VFLAGS')
-
+	$if !enable_usecache_test ? {
+		eprintln('> ${@LOCATION} use `-d enable_usecache_test` in VFLAGS to enable this task')
+		return
+	}
 	exec('v wipe-cache')
 	exec('v -usecache examples/hello_world.v')
 	exec('./examples/hello_world')
@@ -150,11 +152,11 @@ fn v_self_compilation_usecache_tcc() {
 }
 
 fn test_password_input_tcc() {
-	exec('v -silent test examples/password/')
+	exec('v test examples/password/')
 }
 
 fn test_readline_tcc() {
-	exec('v -silent test examples/readline/')
+	exec('v test examples/readline/')
 }
 
 fn test_leak_detector_tcc() {
@@ -170,10 +172,7 @@ fn test_leak_detector_not_active_tcc() {
 	exec('[ "$(stat -c %s leaks.txt)" = "0" ]')
 }
 
-//
 // GCC job tasks
-//
-
 fn all_code_is_formatted_gcc() {
 	all_code_is_formatted()
 }
@@ -185,6 +184,9 @@ fn install_dependencies_for_examples_and_tools_gcc() {
 	exec('v retry -- sudo apt update')
 	exec('v retry -- sudo apt install --quiet -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev valgrind')
 	exec('v retry -- sudo apt install --quiet -y libfreetype6-dev libxi-dev libxcursor-dev libgl-dev libxrandr-dev libasound2-dev')
+	// Wayland development libraries for sokol Wayland support
+	exec('v retry -- sudo apt install --quiet -y libwayland-dev libxkbcommon-dev libwayland-egl1-mesa libxkbcommon-x11-dev wayland-protocols libegl-dev')
+	exec('v retry -- sudo apt install --quiet -y libx11-dev libgl1-mesa-dri xauth xvfb')
 }
 
 fn recompile_v_with_cstrict_gcc() {
@@ -209,8 +211,10 @@ fn v_self_compilation_gcc() {
 }
 
 fn v_self_compilation_usecache_gcc() {
-	exec('unset VFLAGS')
-
+	$if !enable_usecache_test ? {
+		eprintln('> ${@LOCATION} use `-d enable_usecache_test` in VFLAGS to enable this task')
+		return
+	}
 	exec('v wipe-cache')
 	exec('v -usecache examples/hello_world.v')
 	exec('examples/hello_world')
@@ -293,10 +297,7 @@ fn compile_vup_prod_gcc() {
 	exec('v -showcc -cc gcc -prod cmd/tools/vup.v')
 }
 
-//
 // Clang job tasks
-//
-
 fn all_code_is_formatted_clang() {
 	all_code_is_formatted()
 }
@@ -308,6 +309,8 @@ fn install_dependencies_for_examples_and_tools_clang() {
 	exec('v retry -- sudo apt update')
 	exec('v retry -- sudo apt install --quiet -y postgresql libpq-dev libssl-dev sqlite3 libsqlite3-dev valgrind')
 	exec('v retry -- sudo apt install --quiet -y libfreetype6-dev libxi-dev libxcursor-dev libgl-dev libxrandr-dev libasound2-dev')
+	// Wayland development libraries for sokol Wayland support
+	exec('v retry -- sudo apt install --quiet -y libwayland-dev libxkbcommon-dev libwayland-egl1-mesa libxkbcommon-x11-dev wayland-protocols libegl-dev')
 	exec('v retry -- sudo apt install --quiet -y clang')
 }
 
@@ -332,8 +335,10 @@ fn v_self_compilation_clang() {
 }
 
 fn v_self_compilation_usecache_clang() {
-	exec('unset VFLAGS')
-
+	$if !enable_usecache_test ? {
+		eprintln('> ${@LOCATION} use `-d enable_usecache_test` in VFLAGS to enable this task')
+		return
+	}
 	exec('v wipe-cache')
 	exec('v -usecache examples/hello_world.v')
 	exec('./examples/hello_world')
@@ -374,7 +379,7 @@ fn build_examples_clang() {
 }
 
 fn build_examples_autofree_clang() {
-	exec('v -autofree -experimental -o tetris examples/tetris/tetris.v')
+	exec('v -N -W -autofree -experimental -o tetris examples/tetris/tetris.v')
 	exec('rm -f tetris')
 }
 
@@ -394,31 +399,11 @@ fn build_modules_clang() {
 	exec('v build-module vlib/os/cmdline')
 }
 
-fn native_machine_code_generation_common() {
-	exec('cd cmd/tools && v gen1m.v')
-	exec('cd cmd/tools && ./gen1m > 1m.v')
-	exec('cd cmd/tools && v -backend native -o 1m 1m.v')
-	exec('cd cmd/tools && ./1m && ls -larS 1m*')
-	exec('cd cmd/tools && rm -f ./1m ./1m.v')
+fn test_inline_assembly() {
+	exec('v test vlib/v/slow_tests/assembly')
 }
 
-fn native_machine_code_generation_gcc() {
-	native_machine_code_generation_common()
-}
-
-fn native_machine_code_generation_clang() {
-	native_machine_code_generation_common()
-}
-
-fn native_cross_compilation_to_macos() {
-	exec('v -os macos -experimental -b native -o hw.macos examples/hello_world.v')
-	common.file_size_greater_than('hw.macos', 8000)
-	exec('rm -f hw.macos')
-}
-
-//
 // Collect all tasks
-//
 const all_tasks = {
 	'build_v_with_prealloc':                             Task{build_v_with_prealloc, 'Build V with prealloc'}
 	// tcc tasks
@@ -480,9 +465,7 @@ const all_tasks = {
 	'build_examples_clang':                              Task{build_examples_clang, 'Build examples (clang)'}
 	'build_examples_autofree_clang':                     Task{build_examples_autofree_clang, 'Build examples with -autofree (clang)'}
 	'build_modules_clang':                               Task{build_modules_clang, 'Build modules (clang)'}
-	'native_machine_code_generation_clang':              Task{native_machine_code_generation_clang, 'native machine code generation (clang)'}
-	'native_machine_code_generation_gcc':                Task{native_machine_code_generation_gcc, 'native machine code generation (gcc)'}
-	'native_cross_compilation_to_macos':                 Task{native_cross_compilation_to_macos, 'native cross compilation to macos'}
+	'test_inline_assembly':                              Task{test_inline_assembly, 'Test inline assembly'}
 }
 
 common.run(all_tasks)

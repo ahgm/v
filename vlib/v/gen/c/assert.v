@@ -22,15 +22,48 @@ fn (mut g Gen) assert_stmt(original_assert_statement ast.AssertStmt) {
 	mut save_right := ast.empty_expr
 
 	if mut node.expr is ast.InfixExpr {
-		if subst_expr := g.assert_subexpression_to_ctemp(node.expr.left, node.expr.left_type) {
-			save_left = node.expr.left
-			node.expr.left = subst_expr
-		}
-		if subst_expr := g.assert_subexpression_to_ctemp(node.expr.right, node.expr.right_type) {
-			save_right = node.expr.right
-			node.expr.right = subst_expr
+		// Don't extract subexpressions to ctemps for && and || operators,
+		// as this would break short-circuit evaluation semantics.
+		// The right side of && must only execute after the left side is true.
+		if node.expr.op !in [.and, .logical_or] {
+			mut left_expr_type := node.expr.left_type
+			mut right_expr_type := node.expr.right_type
+			if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+				resolved_left_type := g.resolved_expr_type(node.expr.left, node.expr.left_type)
+				if resolved_left_type != 0 {
+					resolved_sym := g.table.sym(resolved_left_type)
+					left_sym := g.table.sym(left_expr_type)
+					if resolved_sym.kind !in [.sum_type, .interface]
+						|| left_sym.kind in [.sum_type, .interface] {
+						left_expr_type = resolved_left_type
+					}
+				}
+				resolved_right_type := g.resolved_expr_type(node.expr.right, node.expr.right_type)
+				if resolved_right_type != 0 {
+					resolved_sym := g.table.sym(resolved_right_type)
+					right_sym := g.table.sym(right_expr_type)
+					if resolved_sym.kind !in [.sum_type, .interface]
+						|| right_sym.kind in [.sum_type, .interface] {
+						right_expr_type = resolved_right_type
+					}
+				}
+			}
+			if subst_expr := g.assert_subexpression_to_ctemp(node.expr.left, left_expr_type) {
+				save_left = node.expr.left
+				node.expr.left = subst_expr
+			}
+			// For || and && operators, do not pre-evaluate the right side
+			// to allow short-circuit evaluation to work correctly.
+			if node.expr.op !in [.logical_or, .and] {
+				if subst_expr := g.assert_subexpression_to_ctemp(node.expr.right, right_expr_type) {
+					save_right = node.expr.right
+					node.expr.right = subst_expr
+				}
+			}
 		}
 	}
+	metaname := g.gen_assert_metainfo_common(node)
+	g.set_current_pos_as_last_stmt_pos()
 	g.inside_ternary++
 	if g.pref.is_test {
 		g.write('if (')
@@ -41,11 +74,11 @@ fn (mut g Gen) assert_stmt(original_assert_statement ast.AssertStmt) {
 		g.write(')')
 		g.decrement_inside_ternary()
 		g.writeln(' {')
-		metaname_ok := g.gen_assert_metainfo(node, .pass)
-		g.writeln('\tmain__TestRunner_name_table[test_runner._typ]._method_assert_pass(test_runner._object, &${metaname_ok});')
+		g.gen_assert_metainfo(node, .pass, metaname)
+		g.writeln('\tmain__TestRunner_name_table[test_runner._typ]._method_assert_pass(test_runner._object, &${metaname});')
 		g.writeln('} else {')
-		metaname_fail := g.gen_assert_metainfo(node, .fail)
-		g.writeln('\tmain__TestRunner_name_table[test_runner._typ]._method_assert_fail(test_runner._object, &${metaname_fail});')
+		g.gen_assert_metainfo(node, .fail, metaname)
+		g.writeln('\tmain__TestRunner_name_table[test_runner._typ]._method_assert_fail(test_runner._object, &${metaname});')
 		g.gen_assert_postfailure_mode(node)
 		g.writeln('}')
 	} else {
@@ -57,52 +90,86 @@ fn (mut g Gen) assert_stmt(original_assert_statement ast.AssertStmt) {
 		g.write('))')
 		g.decrement_inside_ternary()
 		g.writeln(' {')
-		metaname_panic := g.gen_assert_metainfo(node, .panic)
-		g.writeln('\t__print_assert_failure(&${metaname_panic});')
+		g.gen_assert_metainfo(node, .panic, metaname)
+		g.writeln('\tbuiltin____print_assert_failure(&${metaname});')
 		g.gen_assert_postfailure_mode(node)
 		g.writeln('}')
 	}
 
 	if mut node.expr is ast.InfixExpr {
-		if node.expr.left is ast.CTempVar {
+		restore_left := node.expr.left is ast.CTempVar
+		restore_right := node.expr.right is ast.CTempVar
+		if restore_left {
 			node.expr.left = save_left
 		}
-		if node.expr.right is ast.CTempVar {
+		if restore_right {
 			node.expr.right = save_right
 		}
 	}
 }
 
-struct UnsupportedAssertCtempTransform {
-	Error
-}
-
-const unsupported_ctemp_assert_transform = IError(UnsupportedAssertCtempTransform{})
-
-fn (mut g Gen) assert_subexpression_to_ctemp(expr ast.Expr, expr_type ast.Type) !ast.Expr {
+fn (mut g Gen) assert_subexpression_to_ctemp(expr ast.Expr, expr_type ast.Type) ?ast.Expr {
 	match expr {
 		ast.CallExpr {
 			return g.new_ctemp_var_then_gen(expr, expr_type)
 		}
 		ast.ParExpr {
 			if expr.expr is ast.CallExpr {
-				return g.new_ctemp_var_then_gen(expr.expr, expr_type)
+				return g.new_ctemp_var_then_gen(ast.Expr(expr.expr), expr_type)
 			}
 		}
+		ast.PostfixExpr {
+			return g.new_ctemp_var_then_gen(expr, expr_type)
+		}
 		ast.SelectorExpr {
+			if expr.expr is ast.AsCast {
+				mut subst_expr := expr
+				as_cast_expr := expr.expr as ast.AsCast
+				subst_expr.expr = ast.Expr(g.new_ctemp_var_then_gen(ast.Expr(as_cast_expr),
+					as_cast_expr.typ))
+				return ast.Expr(subst_expr)
+			}
+			if expr.expr is ast.ParExpr && expr.expr.expr is ast.AsCast {
+				mut subst_expr := expr
+				as_cast_expr := expr.expr.expr as ast.AsCast
+				subst_expr.expr = ast.Expr(g.new_ctemp_var_then_gen(ast.Expr(as_cast_expr),
+					as_cast_expr.typ))
+				return ast.Expr(subst_expr)
+			}
 			if expr.expr is ast.CallExpr {
 				sym := g.table.final_sym(g.unwrap_generic(expr.expr.return_type))
 				if sym.kind == .struct {
 					if (sym.info as ast.Struct).is_union {
-						return unsupported_ctemp_assert_transform
+						return none
 					}
 				}
 				return g.new_ctemp_var_then_gen(expr, expr_type)
 			}
+			if g.need_tmp_var_in_expr(expr) {
+				return g.new_ctemp_var_then_gen(expr, expr_type)
+			}
 		}
-		else {}
+		ast.LockExpr {
+			return g.new_ctemp_var_then_gen(expr, expr_type)
+		}
+		ast.ArrayInit {
+			if expr.has_callexpr || g.need_tmp_var_in_expr(expr) {
+				return g.new_ctemp_var_then_gen(expr, expr_type)
+			}
+		}
+		ast.StructInit {
+			if g.need_tmp_var_in_expr(expr) {
+				return g.new_ctemp_var_then_gen(expr, expr_type)
+			}
+		}
+		else {
+			if g.need_tmp_var_in_expr(expr) {
+				return g.new_ctemp_var_then_gen(expr, expr_type)
+			}
+		}
 	}
-	return unsupported_ctemp_assert_transform
+
+	return none
 }
 
 fn (mut g Gen) gen_assert_postfailure_mode(node ast.AssertStmt) {
@@ -111,71 +178,30 @@ fn (mut g Gen) gen_assert_postfailure_mode(node ast.AssertStmt) {
 		|| g.fn_decl.attrs.any(it.name == 'assert_continues') {
 		return
 	}
+	if g.pref.is_test && !g.inside_defer_generation && g.cur_fn != unsafe { nil }
+		&& g.cur_fn.scope != unsafe { nil } {
+		g.write_defer_stmts_when_needed(g.innermost_active_defer_scope(node.pos), true, node.pos)
+	}
 	if g.pref.assert_failure_mode == .aborts || g.fn_decl.attrs.any(it.name == 'assert_aborts') {
 		g.writeln('\tabort();')
 	}
 	if g.pref.assert_failure_mode == .backtraces
 		|| g.fn_decl.attrs.any(it.name == 'assert_backtraces') {
 		if _ := g.table.fns['print_backtrace'] {
-			g.writeln('\tprint_backtrace();')
+			g.writeln('\tbuiltin__print_backtrace();')
 		}
 	}
 	if g.pref.is_test {
 		g.writeln('\tlongjmp(g_jump_buffer, 1);')
 	}
-	g.writeln2('\t// TODO', '\t// Maybe print all vars in a test function if it fails?')
 	if g.pref.assert_failure_mode != .continues {
-		g.writeln('\t_v_panic(_S("Assertion failed..."));')
+		g.writeln('\tbuiltin___v_panic(_S("Assertion failed..."));')
 	}
 }
 
-fn (mut g Gen) gen_assert_metainfo(node ast.AssertStmt, kind AssertMetainfoKind) string {
-	mod_path := cestring(g.file.path)
-	fn_name := g.fn_decl.name
-	line_nr := node.pos.line_nr
-	mut src := node.expr.str()
-	if node.extra !is ast.EmptyExpr {
-		src += ', ' + node.extra.str()
-	}
-	src = cestring(src)
-	metaname := 'v_assert_meta_info_${g.new_tmp_var()}'
-	g.writeln('\tVAssertMetaInfo ${metaname} = {0};')
-	g.writeln('\t${metaname}.fpath = ${ctoslit(mod_path)};')
-	g.writeln('\t${metaname}.line_nr = ${line_nr};')
-	g.writeln('\t${metaname}.fn_name = ${ctoslit(fn_name)};')
-	metasrc := cnewlines(ctoslit(src))
-	g.writeln('\t${metaname}.src = ${metasrc};')
-	match node.expr {
-		ast.InfixExpr {
-			expr_op_str := ctoslit(node.expr.op.str())
-			expr_left_str := cnewlines(ctoslit(node.expr.left.str()))
-			expr_right_str := cnewlines(ctoslit(node.expr.right.str()))
-			g.writeln('\t${metaname}.op = ${expr_op_str};')
-			g.writeln('\t${metaname}.llabel = ${expr_left_str};')
-			g.writeln('\t${metaname}.rlabel = ${expr_right_str};')
-			left_type := if node.expr.left_ct_expr {
-				g.type_resolver.get_type_or_default(node.expr.left, node.expr.left_type)
-			} else {
-				node.expr.left_type
-			}
-			right_type := if node.expr.right_ct_expr {
-				g.type_resolver.get_type(node.expr.right)
-			} else {
-				node.expr.right_type
-			}
-			if kind != .pass {
-				g.write('\t${metaname}.lvalue = ')
-				g.gen_assert_single_expr(node.expr.left, left_type)
-				g.writeln(';')
-				g.write('\t${metaname}.rvalue = ')
-				g.gen_assert_single_expr(node.expr.right, right_type)
-				g.writeln(';')
-			}
-		}
-		ast.CallExpr {
-			g.writeln('\t${metaname}.op = _S("call");')
-		}
-		else {}
+fn (mut g Gen) gen_assert_metainfo(node ast.AssertStmt, kind AssertMetainfoKind, metaname string) {
+	if kind == .pass {
+		return
 	}
 	if node.extra is ast.EmptyExpr {
 		g.writeln('\t${metaname}.has_msg = false;')
@@ -186,11 +212,95 @@ fn (mut g Gen) gen_assert_metainfo(node ast.AssertStmt, kind AssertMetainfoKind)
 		g.gen_assert_single_expr(node.extra, ast.string_type)
 		g.writeln(';')
 	}
+	match node.expr {
+		ast.InfixExpr {
+			mut left_type := if node.expr.left_ct_expr {
+				g.type_resolver.get_type_or_default(node.expr.left, node.expr.left_type)
+			} else {
+				node.expr.left_type
+			}
+			mut right_type := if node.expr.right_ct_expr {
+				g.type_resolver.get_type(node.expr.right)
+			} else {
+				node.expr.right_type
+			}
+			if g.cur_fn != unsafe { nil } && g.cur_concrete_types.len > 0 {
+				resolved_left := g.resolved_expr_type(node.expr.left, node.expr.left_type)
+				if resolved_left != 0 {
+					resolved_sym := g.table.sym(resolved_left)
+					left_sym := g.table.sym(left_type)
+					if resolved_sym.kind !in [.sum_type, .interface]
+						|| left_sym.kind in [.sum_type, .interface] {
+						left_type = resolved_left
+					}
+				}
+				resolved_right := g.resolved_expr_type(node.expr.right, node.expr.right_type)
+				if resolved_right != 0 {
+					resolved_sym := g.table.sym(resolved_right)
+					right_sym := g.table.sym(right_type)
+					if resolved_sym.kind !in [.sum_type, .interface]
+						|| right_sym.kind in [.sum_type, .interface] {
+						right_type = resolved_right
+					}
+				}
+			}
+			g.write('\t${metaname}.lvalue = ')
+			g.gen_assert_single_expr(node.expr.left, left_type)
+			g.writeln(';')
+			// For && and || operators, use a placeholder for rvalue
+			// to avoid issues with go_before_last_stmt() which can generate
+			// temporary variables outside the conditional scope.
+			// - For &&: if left is false, right is short-circuited
+			// - For ||: if left is true, right is short-circuited
+			if node.expr.op in [.logical_or, .and] {
+				g.writeln('\t${metaname}.rvalue = _S("<short-circuited>");')
+			} else {
+				g.write('\t${metaname}.rvalue = ')
+				g.gen_assert_single_expr(node.expr.right, right_type)
+				g.writeln(';')
+			}
+		}
+		else {}
+	}
+}
+
+fn (mut g Gen) gen_assert_metainfo_common(node ast.AssertStmt) string {
+	mod_path := cestring(g.file.path)
+	fn_name := g.fn_decl.name
+	line_nr := node.pos.line_nr
+	mut src := node.expr.str()
+	if node.extra !is ast.EmptyExpr {
+		src += ', ' + node.extra.str()
+	}
+	src = cestring(src)
+	metaname := 'v_assert_meta_info_${g.new_tmp_var()}'
+	g.writeln('VAssertMetaInfo ${metaname} = {0};')
+	g.writeln('${metaname}.fpath = ${ctoslit(mod_path)};')
+	g.writeln('${metaname}.line_nr = ${line_nr};')
+	g.writeln('${metaname}.fn_name = ${ctoslit(fn_name)};')
+	metasrc := cnewlines(ctoslit(src))
+	g.writeln('${metaname}.src = ${metasrc};')
+	g.writeln('${metaname}.has_msg = false;')
+	match node.expr {
+		ast.InfixExpr {
+			expr_op_str := ctoslit(node.expr.op.str())
+			expr_left_str := cnewlines(ctoslit(node.expr.left.str()))
+			expr_right_str := cnewlines(ctoslit(node.expr.right.str()))
+			g.writeln('${metaname}.op = ${expr_op_str};')
+			g.writeln('${metaname}.llabel = ${expr_left_str};')
+			g.writeln('${metaname}.rlabel = ${expr_right_str};')
+		}
+		ast.CallExpr {
+			g.writeln('${metaname}.op = _S("call");')
+		}
+		else {}
+	}
+
 	return metaname
 }
 
 fn (mut g Gen) gen_assert_single_expr(expr ast.Expr, typ ast.Type) {
-	// eprintln('> gen_assert_single_expr typ: $typ | expr: $expr | typeof(expr): ${typeof(expr)}')
+	// eprintln('> gen_assert_single_expr typ: ${typ} | expr: ${expr} | typeof(expr): ${typeof(expr)}')
 	expr_str := '${expr}'
 	match expr {
 		ast.CastExpr {
@@ -241,7 +351,7 @@ fn (mut g Gen) gen_assert_single_expr(expr ast.Expr, typ ast.Type) {
 				}
 			}
 			if should_clone {
-				g.write('string_clone(')
+				g.write('builtin__string_clone(')
 			}
 			g.gen_expr_to_string(expr, typ)
 			if should_clone {

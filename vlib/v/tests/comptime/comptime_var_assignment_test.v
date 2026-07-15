@@ -12,7 +12,7 @@ fn encode_struct[T](val T) []string {
 		$if field.is_option {
 			gg := value ?
 			println(gg)
-			out << '${value}'
+			out << '${gg}'
 		} $else {
 			gg := value
 			println(gg)
@@ -26,6 +26,6 @@ fn test_main() {
 	out := encode_struct(FixedStruct1{1, 'foo', 4, 'bar'})
 	assert out[0] == '1'
 	assert out[1] == 'foo'
-	assert out[2] == 'Option(4)'
-	assert out[3] == "Option('bar')"
+	assert out[2] == '4'
+	assert out[3] == 'bar'
 }

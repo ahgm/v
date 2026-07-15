@@ -1,22 +1,21 @@
 module veb
 
 import compress.gzip
+import compress.zstd
 import net.http
 
 pub type MiddlewareHandler[T] = fn (mut T) bool
 
-// TODO: get rid of this `voidptr` interface check when generic embedded
-// interfaces work properly, related: #19968
 interface MiddlewareApp {
-mut:
-	global_handlers       []voidptr
-	global_handlers_after []voidptr
-	route_handlers        []RouteMiddleware
-	route_handlers_after  []RouteMiddleware
+	get_handlers_for_route(route_path string) []RouteMiddleware
+	get_handlers_for_route_after(route_path string) []RouteMiddleware
+	get_global_handlers() []voidptr
+	get_global_handlers_after() []voidptr
 }
 
 struct RouteMiddleware {
 	url_parts []string
+	methods   []http.Method
 	handler   voidptr
 }
 
@@ -33,6 +32,7 @@ pub struct MiddlewareOptions[T] {
 pub:
 	handler fn (mut ctx T) bool @[required]
 	after   bool
+	methods []http.Method
 }
 
 // string representation of Middleware
@@ -58,6 +58,7 @@ pub fn (mut m Middleware[T]) use(options MiddlewareOptions[T]) {
 pub fn (mut m Middleware[T]) route_use(route string, options MiddlewareOptions[T]) {
 	middleware := RouteMiddleware{
 		url_parts: route.split('/').filter(it != '')
+		methods:   options.methods.clone()
 		handler:   voidptr(options.handler)
 	}
 
@@ -68,34 +69,34 @@ pub fn (mut m Middleware[T]) route_use(route string, options MiddlewareOptions[T
 	}
 }
 
-fn (m &Middleware[T]) get_handlers_for_route(route_path string) []voidptr {
-	mut fns := []voidptr{}
+fn (m &Middleware[T]) get_handlers_for_route(route_path string) []RouteMiddleware {
+	mut handlers := []RouteMiddleware{}
 	route_parts := route_path.split('/').filter(it != '')
 
 	for handler in m.route_handlers {
 		if _ := route_matches(route_parts, handler.url_parts) {
-			fns << handler.handler
+			handlers << handler
 		} else if handler.url_parts.len == 0 && route_path == '/index' {
-			fns << handler.handler
+			handlers << handler
 		}
 	}
 
-	return fns
+	return handlers
 }
 
-fn (m &Middleware[T]) get_handlers_for_route_after(route_path string) []voidptr {
-	mut fns := []voidptr{}
+fn (m &Middleware[T]) get_handlers_for_route_after(route_path string) []RouteMiddleware {
+	mut handlers := []RouteMiddleware{}
 	route_parts := route_path.split('/').filter(it != '')
 
 	for handler in m.route_handlers_after {
 		if _ := route_matches(route_parts, handler.url_parts) {
-			fns << handler.handler
+			handlers << handler
 		} else if handler.url_parts.len == 0 && route_path == '/index' {
-			fns << handler.handler
+			handlers << handler
 		}
 	}
 
-	return fns
+	return handlers
 }
 
 fn (m &Middleware[T]) get_global_handlers() []voidptr {
@@ -104,6 +105,78 @@ fn (m &Middleware[T]) get_global_handlers() []voidptr {
 
 fn (m &Middleware[T]) get_global_handlers_after() []voidptr {
 	return m.global_handlers_after
+}
+
+fn app_route_handlers[A](app &A, route_path string) []RouteMiddleware {
+	$if A is $struct {
+		$for field in A.fields {
+			$if field.is_embed {
+				$if field.name == 'Middleware' {
+					return app.$(field.name).get_handlers_for_route(route_path)
+				} $else $if field.typ is $struct {
+					handlers := app_route_handlers(app.$(field.name), route_path)
+					if handlers.len > 0 {
+						return handlers
+					}
+				}
+			}
+		}
+	}
+	return []RouteMiddleware{}
+}
+
+fn app_route_handlers_after[A](app &A, route_path string) []RouteMiddleware {
+	$if A is $struct {
+		$for field in A.fields {
+			$if field.is_embed {
+				$if field.name == 'Middleware' {
+					return app.$(field.name).get_handlers_for_route_after(route_path)
+				} $else $if field.typ is $struct {
+					handlers := app_route_handlers_after(app.$(field.name), route_path)
+					if handlers.len > 0 {
+						return handlers
+					}
+				}
+			}
+		}
+	}
+	return []RouteMiddleware{}
+}
+
+fn app_global_handlers[A](app &A) []voidptr {
+	$if A is $struct {
+		$for field in A.fields {
+			$if field.is_embed {
+				$if field.name == 'Middleware' {
+					return app.$(field.name).get_global_handlers()
+				} $else $if field.typ is $struct {
+					handlers := app_global_handlers(app.$(field.name))
+					if handlers.len > 0 {
+						return handlers
+					}
+				}
+			}
+		}
+	}
+	return []voidptr{}
+}
+
+fn app_global_handlers_after[A](app &A) []voidptr {
+	$if A is $struct {
+		$for field in A.fields {
+			$if field.is_embed {
+				$if field.name == 'Middleware' {
+					return app.$(field.name).get_global_handlers_after()
+				} $else $if field.typ is $struct {
+					handlers := app_global_handlers_after(app.$(field.name))
+					if handlers.len > 0 {
+						return handlers
+					}
+				}
+			}
+		}
+	}
+	return []voidptr{}
 }
 
 fn validate_middleware[T](mut ctx T, raw_handlers []voidptr) bool {
@@ -117,38 +190,138 @@ fn validate_middleware[T](mut ctx T, raw_handlers []voidptr) bool {
 	return true
 }
 
+fn route_middleware_matches_method(route_middleware RouteMiddleware, request_method http.Method) bool {
+	return route_middleware.methods.len == 0 || request_method in route_middleware.methods
+}
+
+fn get_handlers_for_method(route_middlewares []RouteMiddleware, request_method http.Method) []voidptr {
+	mut handlers := []voidptr{}
+	for route_middleware in route_middlewares {
+		if route_middleware_matches_method(route_middleware, request_method) {
+			handlers << route_middleware.handler
+		}
+	}
+	return handlers
+}
+
+// Compression encoding types for HTTP responses
+enum ContentEncoding {
+	gzip
+	zstd
+}
+
+// send_compressed_response compresses the response body and updates the response.
+// Returns true if compression should be skipped, false if compression was applied.
+fn send_compressed_response(mut ctx Context, encoding ContentEncoding) bool {
+	compressed, encoding_name := match encoding {
+		.zstd {
+			data := zstd.compress(ctx.res.body.bytes()) or {
+				eprintln('[veb] error while compressing with zstd: ${err.msg()}')
+				return true
+			}
+			data, 'zstd'
+		}
+		.gzip {
+			data := gzip.compress(ctx.res.body.bytes()) or {
+				eprintln('[veb] error while compressing with gzip: ${err.msg()}')
+				return true
+			}
+			data, 'gzip'
+		}
+	}
+
+	// Set HTTP headers for compressed content
+	ctx.res.header.add(.content_encoding, encoding_name)
+	ctx.res.header.set(.vary, 'Accept-Encoding')
+
+	// Replace the response body with the compressed data and update Content-Length.
+	// The normal response path will handle sending it.
+	ctx.res.body = compressed.bytestr()
+	ctx.res.header.set(.content_length, compressed.len.str())
+	ctx.already_compressed = true
+
+	return false
+}
+
+// should_skip_compression checks if compression should be skipped for this context.
+fn should_skip_compression(ctx Context) bool {
+	// Skip if already compressed (optimization for static files compressed in send_file)
+	if ctx.already_compressed {
+		return true
+	}
+	// Skip compression for files in streaming mode (no takeover)
+	// Files in takeover mode (small files loaded in memory) are compressed
+	if ctx.return_type == .file && ctx.takeover_mode == .none {
+		return true
+	}
+	return false
+}
+
 // encode_gzip adds gzip encoding to the HTTP Response body.
-// This middleware does not encode files, if you return `ctx.file()`.
+// This middleware compresses dynamic routes and static files loaded in memory (takeover mode).
+// Static files in streaming mode are compressed by send_file() when static compression is enabled,
+// and this middleware skips them to avoid double compression (via the already_compressed flag).
 // Register this middleware as last!
 // Usage example: app.use(veb.encode_gzip[Context]())
 pub fn encode_gzip[T]() MiddlewareOptions[T] {
 	return MiddlewareOptions[T]{
 		after:   true
 		handler: fn [T](mut ctx T) bool {
-			// TODO: compress file in streaming manner, or precompress them?
-			if ctx.return_type == .file {
+			if should_skip_compression(ctx.Context) {
 				return true
 			}
-			// first try compressions, because if it fails we can still send a response
-			// before taking over the connection
-			compressed := gzip.compress(ctx.res.body.bytes()) or {
-				eprintln('[veb] error while compressing with gzip: ${err.msg()}')
+			return send_compressed_response(mut ctx.Context, .gzip)
+		}
+	}
+}
+
+// encode_zstd adds zstd encoding to the HTTP Response body.
+// This middleware compresses dynamic routes and static files loaded in memory (takeover mode).
+// Static files in streaming mode are compressed by send_file() when static compression is enabled,
+// and this middleware skips them to avoid double compression (via the already_compressed flag).
+// Register this middleware as last!
+// Usage example: app.route_use('/api', veb.encode_zstd[Context]())
+pub fn encode_zstd[T]() MiddlewareOptions[T] {
+	return MiddlewareOptions[T]{
+		after:   true
+		handler: fn [T](mut ctx T) bool {
+			if should_skip_compression(ctx.Context) {
 				return true
 			}
-			// enables us to have full control over what response is send over the connection
-			// and how.
-			ctx.takeover_conn()
+			return send_compressed_response(mut ctx.Context, .zstd)
+		}
+	}
+}
 
-			// set HTTP headers for gzip
-			ctx.res.header.add(.content_encoding, 'gzip')
-			ctx.res.header.set(.vary, 'Accept-Encoding')
-			ctx.res.header.set(.content_length, compressed.len.str())
+// encode_auto adds automatic content encoding (zstd or gzip) based on the client's Accept-Encoding header.
+// This middleware checks the Accept-Encoding header and compresses with zstd if supported, otherwise gzip.
+// Static files in streaming mode are compressed by send_file() when static compression is enabled,
+// and this middleware skips them to avoid double compression (via the already_compressed flag).
+// Register this middleware as last!
+// Usage example: app.use(veb.encode_auto[Context]())
+pub fn encode_auto[T]() MiddlewareOptions[T] {
+	return MiddlewareOptions[T]{
+		after:   true
+		handler: fn [T](mut ctx T) bool {
+			if should_skip_compression(ctx.Context) {
+				return true
+			}
 
-			fast_send_resp_header(mut ctx.Context.conn, ctx.res) or {}
-			ctx.Context.conn.write_ptr(&u8(compressed.data), compressed.len) or {}
-			ctx.Context.conn.close() or {}
+			// Check Accept-Encoding header to determine best compression
+			accept_encoding := ctx.req.header.get(.accept_encoding) or { '' }
+			supports_zstd := accept_encoding.contains('zstd')
+			supports_gzip := accept_encoding.contains('gzip')
 
-			return false
+			// Try zstd first (better compression ratio), fallback to gzip
+			if supports_zstd {
+				return send_compressed_response(mut ctx.Context, .zstd)
+			}
+			if supports_gzip {
+				return send_compressed_response(mut ctx.Context, .gzip)
+			}
+
+			// No supported compression
+			return true
 		}
 	}
 }
@@ -159,21 +332,38 @@ pub fn encode_gzip[T]() MiddlewareOptions[T] {
 pub fn decode_gzip[T]() MiddlewareOptions[T] {
 	return MiddlewareOptions[T]{
 		handler: fn [T](mut ctx T) bool {
-			if encoding := ctx.res.header.get(.content_encoding) {
+			if encoding := ctx.req.header.get(.content_encoding) {
 				if encoding == 'gzip' {
-					decompressed := gzip.decompress(ctx.req.body.bytes()) or {
+					decompressed := gzip.decompress(ctx.req.data.bytes()) or {
 						ctx.request_error('invalid gzip encoding')
 						return false
 					}
-					ctx.req.body = decompressed.bytestr()
+					ctx.req.data = decompressed.bytestr()
 				}
 			}
+			return true
 		}
 	}
 }
 
-interface HasBeforeRequest {
-	before_request()
+// decode_zstd decodes the body of a zstd-compressed HTTP request.
+// Register this middleware before you do anything with the request body!
+// Usage example: app.use(veb.decode_zstd[Context]())
+pub fn decode_zstd[T]() MiddlewareOptions[T] {
+	return MiddlewareOptions[T]{
+		handler: fn [T](mut ctx T) bool {
+			if encoding := ctx.req.header.get(.content_encoding) {
+				if encoding == 'zstd' {
+					decompressed := zstd.decompress(ctx.req.data.bytes()) or {
+						ctx.request_error('invalid zstd encoding')
+						return false
+					}
+					ctx.req.data = decompressed.bytestr()
+				}
+			}
+			return true
+		}
+	}
 }
 
 pub const cors_safelisted_response_headers = [http.CommonHeader.cache_control, .content_language,

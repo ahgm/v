@@ -97,15 +97,15 @@ pub fn (d Dec32) get_string_32(neg bool, i_n_digit int, i_pad_digit int) string 
 	if i_n_digit == 0 {
 		unsafe {
 			buf[i] = 0
-			return tos(&u8(&buf[0]), i)
+			return tos(memdup(&buf[0], i + 1), i)
 		}
 	}
 
-	if out_len >= 1 {
+	if out_len > 1 || fw_zeros > 0 {
 		buf[y - x] = `.`
-		x++
 		i++
 	}
+	x++
 
 	if y - x >= 0 {
 		buf[y - x] = `0` + u8(out % 10)
@@ -141,7 +141,7 @@ pub fn (d Dec32) get_string_32(neg bool, i_n_digit int, i_pad_digit int) string 
 	buf[i] = 0
 
 	return unsafe {
-		tos(&u8(&buf[0]), i)
+		tos(memdup(&buf[0], i + 1), i)
 	}
 }
 

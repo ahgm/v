@@ -83,10 +83,13 @@ mut:
 
 fn (mut handler MyHttpHandler) handle(req http.Request) http.Response {
 	handler.counter++
-	// eprintln('$time.now() | counter: $handler.counter | $req.method $req.url\n$req.header\n$req.data - 200 OK\n')
+	// eprintln('${time.now()} | counter: ${handler.counter} | ${req.method} ${req.url}\n${req.header}\n${req.data} - 200 OK\n')
+	// Note: the response must not echo `req.header` wholesale — the request's
+	// `Content-Length` (0 for GETs) would override the server's correct one,
+	// yielding a malformed response whose declared length disagrees with its
+	// body.
 	mut r := http.Response{
-		body:   req.data + ', ${req.url}'
-		header: req.header
+		body: req.data + ', ${req.url}'
 	}
 	match req.url.all_before('?') {
 		'/endpoint', '/another/endpoint' {
@@ -109,6 +112,7 @@ fn (mut handler MyHttpHandler) handle(req http.Request) http.Response {
 			handler.not_founds++
 		}
 	}
+
 	r.set_version(req.version)
 	return r
 }
@@ -118,10 +122,9 @@ fn test_server_custom_handler() {
 	defer {
 		log.warn('${@FN} finished')
 	}
-	mut handler := MyHttpHandler{}
 	mut server := &http.Server{
 		accept_timeout: atimeout
-		handler:        handler
+		handler:        MyHttpHandler{}
 		addr:           '127.0.0.1:18197'
 	}
 	t := spawn server.listen_and_serve()
@@ -178,10 +181,14 @@ fn test_server_custom_handler() {
 	server.stop()
 	t.wait()
 
-	assert handler.counter == 5
-	assert handler.oks == 3
-	assert handler.not_founds == 1
-	assert handler.redirects == 1
+	if mut server.handler is MyHttpHandler {
+		assert server.handler.counter == 5
+		assert server.handler.oks == 3
+		assert server.handler.not_founds == 1
+		assert server.handler.redirects == 1
+	} else {
+		assert false, 'expected MyHttpHandler, got ${typeof(server.handler).name}'
+	}
 }
 
 struct ProgressCalls {
@@ -214,6 +221,7 @@ fn (mut handler MyCountingHandler) handle(req http.Request) http.Response {
 			r.set_status(.not_found)
 		}
 	}
+
 	r.set_version(req.version)
 	return r
 }
@@ -283,5 +291,423 @@ fn test_host_header_sent_to_server() {
 	dump(server.addr)
 	x := http.get('http://${server.addr}/')!
 	dump(x)
+	assert x.status_code == 200
+	assert x.status_msg == 'OK'
 	assert x.body.ends_with('${ip}:${port}')
+}
+
+//
+
+struct InvalidResponseHandler {}
+
+fn (mut handler InvalidResponseHandler) handle(req http.Request) http.Response {
+	return http.Response{
+		header: http.new_header_from_map({
+			http.CommonHeader.content_type: 'text/plain'
+		})
+	}
+}
+
+struct InvalidStatusCodeHandler {}
+
+fn (mut handler InvalidStatusCodeHandler) handle(req http.Request) http.Response {
+	return http.Response{
+		body:        'broken status'
+		status_code: 42
+	}
+}
+
+fn test_server_normalizes_invalid_handler_response() {
+	log.warn('${@FN} started')
+	defer { log.warn('${@FN} finished') }
+	mut server := &http.Server{
+		accept_timeout:       atimeout
+		handler:              InvalidResponseHandler{}
+		addr:                 '127.0.0.1:18202'
+		show_startup_message: false
+	}
+	t := spawn server.listen_and_serve()
+	server.wait_till_running() or {
+		estr := err.str()
+		if estr == 'maximum retries reached' {
+			log.error('>>>> Skipping test ${@FN} since its server could not start, err: ${err}')
+			return
+		}
+		log.fatal(estr)
+	}
+
+	mut conn := net.dial_tcp('127.0.0.1:18202')!
+	defer { conn.close() or {} }
+	conn.set_read_timeout(5 * time.second)
+	conn.set_write_timeout(5 * time.second)
+
+	request := 'GET / HTTP/1.1\r\nHost: 127.0.0.1:18202\r\nConnection: close\r\n\r\n'
+	conn.write(request.bytes())!
+	response := read_http_response(mut conn)!
+	lines := response.split('\r\n')
+	assert lines[0] == 'HTTP/1.1 200 OK'
+	assert response.to_lower().contains('content-type: text/plain')
+	assert response.to_lower().contains('content-length: 0')
+
+	server.stop()
+	t.wait()
+}
+
+fn test_server_coerces_invalid_status_code_to_internal_server_error() {
+	log.warn('${@FN} started')
+	defer { log.warn('${@FN} finished') }
+	mut server := &http.Server{
+		accept_timeout:       atimeout
+		handler:              InvalidStatusCodeHandler{}
+		addr:                 '127.0.0.1:18203'
+		show_startup_message: false
+	}
+	t := spawn server.listen_and_serve()
+	server.wait_till_running() or {
+		estr := err.str()
+		if estr == 'maximum retries reached' {
+			log.error('>>>> Skipping test ${@FN} since its server could not start, err: ${err}')
+			return
+		}
+		log.fatal(estr)
+	}
+
+	mut conn := net.dial_tcp('127.0.0.1:18203')!
+	defer { conn.close() or {} }
+	conn.set_read_timeout(5 * time.second)
+	conn.set_write_timeout(5 * time.second)
+
+	request := 'GET / HTTP/1.1\r\nHost: 127.0.0.1:18203\r\nConnection: close\r\n\r\n'
+	conn.write(request.bytes())!
+	response := read_http_response(mut conn)!
+	lines := response.split('\r\n')
+	assert lines[0] == 'HTTP/1.1 500 Internal Server Error'
+	assert response.ends_with('broken status')
+
+	server.stop()
+	t.wait()
+}
+
+//
+
+struct RedirectMethodHandler {}
+
+fn (mut handler RedirectMethodHandler) handle(req http.Request) http.Response {
+	mut r := http.Response{}
+	match req.url {
+		'/redirect-301' {
+			r.header = http.new_header(key: .location, value: '/expect-get')
+			r.set_status(.moved_permanently)
+		}
+		'/redirect-302' {
+			r.header = http.new_header(key: .location, value: '/expect-get')
+			r.set_status(.found)
+		}
+		'/redirect-303' {
+			r.header = http.new_header(key: .location, value: '/expect-get')
+			r.set_status(.see_other)
+		}
+		'/redirect-307' {
+			r.header = http.new_header(key: .location, value: '/expect-post')
+			r.set_status(.temporary_redirect)
+		}
+		'/redirect-308' {
+			r.header = http.new_header(key: .location, value: '/expect-post')
+			r.set_status(.permanent_redirect)
+		}
+		'/expect-get' {
+			if req.method == .get && req.data == '' {
+				r.body = 'redirected-as-get'
+				r.set_status(.ok)
+			} else {
+				r.body = 'expected GET without a body, got ${req.method} `${req.data}`'
+				r.set_status(.method_not_allowed)
+			}
+		}
+		'/expect-post' {
+			if req.method == .post && req.data == 'payload' {
+				r.body = 'preserved-post'
+				r.set_status(.ok)
+			} else {
+				r.body = 'expected POST with payload, got ${req.method} `${req.data}`'
+				r.set_status(.method_not_allowed)
+			}
+		}
+		else {
+			r.set_status(.not_found)
+		}
+	}
+
+	r.set_version(req.version)
+	return r
+}
+
+fn test_redirects_change_post_to_get_only_when_required() {
+	log.warn('${@FN} started')
+	defer { log.warn('${@FN} finished') }
+	mut server := &http.Server{
+		accept_timeout:       atimeout
+		handler:              RedirectMethodHandler{}
+		addr:                 '127.0.0.1:18204'
+		show_startup_message: false
+	}
+	t := spawn server.listen_and_serve()
+	server.wait_till_running() or {
+		estr := err.str()
+		if estr == 'maximum retries reached' {
+			log.error('>>>> Skipping test ${@FN} since its server could not start, err: ${err}')
+			return
+		}
+		log.fatal(estr)
+	}
+
+	for path in ['/redirect-301', '/redirect-302', '/redirect-303'] {
+		resp := http.post('http://${server.addr}${path}', 'payload')!
+		assert resp.status() == .ok
+		assert resp.body == 'redirected-as-get'
+	}
+
+	for path in ['/redirect-307', '/redirect-308'] {
+		resp := http.post('http://${server.addr}${path}', 'payload')!
+		assert resp.status() == .ok
+		assert resp.body == 'preserved-post'
+	}
+
+	server.stop()
+	t.wait()
+}
+
+//
+
+struct KeepAliveHandler {
+mut:
+	request_count int
+}
+
+fn (mut handler KeepAliveHandler) handle(req http.Request) http.Response {
+	handler.request_count++
+	mut r := http.Response{
+		body: 'request #${handler.request_count}: ${req.url}'
+	}
+	r.set_status(.ok)
+	r.set_version(req.version)
+	// Echo back the Connection header from the request if present
+	if conn := req.header.get(.connection) {
+		r.header.set(.connection, conn)
+	}
+	return r
+}
+
+fn test_server_keep_alive() {
+	log.warn('${@FN} started')
+	defer { log.warn('${@FN} finished') }
+	mut server := &http.Server{
+		accept_timeout:       atimeout
+		handler:              KeepAliveHandler{}
+		addr:                 '127.0.0.1:18198'
+		show_startup_message: false
+	}
+	t := spawn server.listen_and_serve()
+	server.wait_till_running() or {
+		estr := err.str()
+		if estr == 'maximum retries reached' {
+			log.error('>>>> Skipping test ${@FN} since its server could not start, err: ${err}')
+			return
+		}
+		log.fatal(estr)
+	}
+
+	// Test keep-alive by sending multiple requests over a single TCP connection
+	mut conn := net.dial_tcp('127.0.0.1:18198')!
+	defer { conn.close() or {} }
+	conn.set_read_timeout(5 * time.second)
+	conn.set_write_timeout(5 * time.second)
+
+	// Send first request with Connection: keep-alive
+	request1 := 'GET /test1 HTTP/1.1\r\nHost: 127.0.0.1:18198\r\nConnection: keep-alive\r\n\r\n'
+	conn.write(request1.bytes())!
+	mut resp1 := read_http_response(mut conn)!
+	log.info('Response 1: ${resp1}')
+	assert resp1.contains('request #1')
+	assert resp1.to_lower().contains('connection: keep-alive')
+
+	// Send second request on the same connection
+	request2 := 'GET /test2 HTTP/1.1\r\nHost: 127.0.0.1:18198\r\nConnection: keep-alive\r\n\r\n'
+	conn.write(request2.bytes())!
+	mut resp2 := read_http_response(mut conn)!
+	log.info('Response 2: ${resp2}')
+	assert resp2.contains('request #2')
+	assert resp2.to_lower().contains('connection: keep-alive')
+
+	// Send third request with Connection: close to end the connection
+	request3 := 'GET /test3 HTTP/1.1\r\nHost: 127.0.0.1:18198\r\nConnection: close\r\n\r\n'
+	conn.write(request3.bytes())!
+	mut resp3 := read_http_response(mut conn)!
+	log.info('Response 3: ${resp3}')
+	assert resp3.contains('request #3')
+	assert resp3.to_lower().contains('connection: close')
+
+	server.stop()
+	t.wait()
+
+	// Verify all 3 requests were handled
+	if mut server.handler is KeepAliveHandler {
+		assert server.handler.request_count == 3
+	} else {
+		assert false, 'expected KeepAliveHandler, got ${typeof(server.handler).name}'
+	}
+}
+
+fn test_server_keep_alive_many_requests() {
+	log.warn('${@FN} started')
+	defer { log.warn('${@FN} finished') }
+	total_requests := 64
+	mut server := &http.Server{
+		accept_timeout:          atimeout
+		handler:                 KeepAliveHandler{}
+		addr:                    '127.0.0.1:18199'
+		show_startup_message:    false
+		max_keep_alive_requests: 0
+	}
+	t := spawn server.listen_and_serve()
+	server.wait_till_running() or {
+		estr := err.str()
+		if estr == 'maximum retries reached' {
+			log.error('>>>> Skipping test ${@FN} since its server could not start, err: ${err}')
+			return
+		}
+		log.fatal(estr)
+	}
+
+	mut conn := net.dial_tcp('127.0.0.1:18199')!
+	defer { conn.close() or {} }
+	conn.set_read_timeout(5 * time.second)
+	conn.set_write_timeout(5 * time.second)
+
+	for i in 0 .. total_requests {
+		path := if i % 2 == 0 { '/left' } else { '/right' }
+		request := 'GET ${path}?n=${i} HTTP/1.1\r\nHost: 127.0.0.1:18199\r\nConnection: keep-alive\r\n\r\n'
+		conn.write(request.bytes())!
+		resp := read_http_response(mut conn)!
+		assert resp.contains('request #${i + 1}')
+		assert resp.contains(path)
+		assert resp.to_lower().contains('connection: keep-alive')
+	}
+
+	request_done := 'GET /done HTTP/1.1\r\nHost: 127.0.0.1:18199\r\nConnection: close\r\n\r\n'
+	conn.write(request_done.bytes())!
+	resp_done := read_http_response(mut conn)!
+	assert resp_done.contains('request #${total_requests + 1}')
+	assert resp_done.contains('/done')
+	assert resp_done.to_lower().contains('connection: close')
+
+	server.stop()
+	t.wait()
+	if mut server.handler is KeepAliveHandler {
+		assert server.handler.request_count == total_requests + 1
+	} else {
+		assert false, 'expected KeepAliveHandler, got ${typeof(server.handler).name}'
+	}
+}
+
+fn test_server_max_keep_alive_requests() {
+	log.warn('${@FN} started')
+	defer { log.warn('${@FN} finished') }
+	mut server := &http.Server{
+		accept_timeout:          atimeout
+		handler:                 KeepAliveHandler{}
+		addr:                    '127.0.0.1:18200'
+		show_startup_message:    false
+		max_keep_alive_requests: 3 // Limit to 3 requests per connection
+	}
+	t := spawn server.listen_and_serve()
+	server.wait_till_running() or {
+		estr := err.str()
+		if estr == 'maximum retries reached' {
+			log.error('>>>> Skipping test ${@FN} since its server could not start, err: ${err}')
+			return
+		}
+		log.fatal(estr)
+	}
+
+	// Test that connection closes after max_keep_alive_requests
+	mut conn := net.dial_tcp('127.0.0.1:18200')!
+	defer { conn.close() or {} }
+	conn.set_read_timeout(5 * time.second)
+	conn.set_write_timeout(5 * time.second)
+
+	// Send first request
+	request1 := 'GET /test1 HTTP/1.1\r\nHost: 127.0.0.1:18200\r\nConnection: keep-alive\r\n\r\n'
+	conn.write(request1.bytes())!
+	mut resp1 := read_http_response(mut conn)!
+	log.info('Response 1: ${resp1}')
+	assert resp1.contains('request #1')
+	assert resp1.to_lower().contains('connection: keep-alive')
+
+	// Send second request
+	request2 := 'GET /test2 HTTP/1.1\r\nHost: 127.0.0.1:18200\r\nConnection: keep-alive\r\n\r\n'
+	conn.write(request2.bytes())!
+	mut resp2 := read_http_response(mut conn)!
+	log.info('Response 2: ${resp2}')
+	assert resp2.contains('request #2')
+	assert resp2.to_lower().contains('connection: keep-alive')
+
+	// Send third request - should get Connection: close since max is reached
+	request3 := 'GET /test3 HTTP/1.1\r\nHost: 127.0.0.1:18200\r\nConnection: keep-alive\r\n\r\n'
+	conn.write(request3.bytes())!
+	mut resp3 := read_http_response(mut conn)!
+	log.info('Response 3: ${resp3}')
+	assert resp3.contains('request #3')
+	assert resp3.to_lower().contains('connection: close'), 'Expected connection: close after max requests reached'
+
+	server.stop()
+	t.wait()
+
+	if mut server.handler is KeepAliveHandler {
+		assert server.handler.request_count == 3
+	} else {
+		assert false, 'expected KeepAliveHandler, got ${typeof(server.handler).name}'
+	}
+}
+
+fn read_http_response(mut conn net.TcpConn) !string {
+	mut response := []u8{}
+	mut buf := []u8{len: 1024}
+	mut content_length := -1
+	mut headers_end := -1
+
+	for {
+		n := conn.read(mut buf) or { break }
+		if n <= 0 {
+			break
+		}
+		response << buf[..n]
+
+		// Check if we have received all headers
+		response_str := response.bytestr()
+		if headers_end == -1 {
+			headers_end = response_str.index('\r\n\r\n') or { -1 }
+			if headers_end != -1 {
+				// Parse Content-Length from headers
+				headers := response_str[..headers_end]
+				for line in headers.split('\r\n') {
+					if line.to_lower().starts_with('content-length:') {
+						content_length = line.all_after(':').trim_space().int()
+						break
+					}
+				}
+			}
+		}
+
+		// Check if we have received the full response
+		if headers_end != -1 && content_length >= 0 {
+			body_start := headers_end + 4
+			body_received := response.len - body_start
+			if body_received >= content_length {
+				break
+			}
+		}
+	}
+
+	return response.bytestr()
 }

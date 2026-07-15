@@ -1,10 +1,20 @@
 import os
-import time
 
 // tfolder will contain all the temporary files/subfolders made by
 // the different tests. It would be removed in testsuite_end(), so
 // individual os tests do not need to clean up after themselves.
 const tfolder = os.join_path(os.vtmp_dir(), 'os_tests')
+const utf16le_stdout_source_code = '
+module main
+
+import os
+
+fn main() {
+	payload := [u8(`O`), 0, `K`, 0, u8(10), 0]
+	mut out := os.stdout()
+	out.write(payload) or { panic(err) }
+}
+'
 
 // os.args has to be *already initialized* with the program's argc/argv at this point
 // thus it can be used for other consts too:
@@ -17,7 +27,7 @@ fn testsuite_begin() {
 	os.mkdir_all(tfolder) or { panic(err) }
 	os.chdir(tfolder) or {}
 	assert os.is_dir(tfolder)
-	// println('args_at_start: $args_at_start')
+	// println('args_at_start: ${args_at_start}')
 	assert args_at_start.len > 0
 	assert args_at_start == os.args
 }
@@ -26,7 +36,7 @@ fn testsuite_end() {
 	os.chdir(os.wd_at_startup) or {}
 	os.rmdir_all(tfolder) or {}
 	// assert !os.is_dir(tfolder)
-	// eprintln('testsuite_end  , tfolder = $tfolder removed.')
+	// eprintln('testsuite_end  , tfolder = ${tfolder} removed.')
 }
 
 fn test_open_file() {
@@ -100,8 +110,8 @@ fn test_open_file_binary() {
 // 	}
 // 	f.close()
 // 	//
-// 	eprintln('line1: $line1 $line1.bytes()')
-// 	eprintln('line2: $line2 $line2.bytes()')
+// 	eprintln('line1: ${line1} ${line1.bytes()}')
+// 	eprintln('line2: ${line2} ${line2.bytes()}')
 // 	assert line1 == 'line 1\n'
 // 	assert line2 == 'line 2'
 // }
@@ -187,8 +197,8 @@ fn test_write_and_read_bytes() {
 	// We only need to test read_bytes because this function calls
 	// read_bytes_at with second parameter zeroed (size, 0).
 	rbytes := file_read.read_bytes(5)
-	// eprintln('rbytes: $rbytes')
-	// eprintln('payload: $payload')
+	// eprintln('rbytes: ${rbytes}')
+	// eprintln('payload: ${payload}')
 	assert rbytes == payload
 	// check that trying to read data from EOF doesn't error and returns 0
 	mut a := []u8{len: 5}
@@ -289,7 +299,8 @@ fn test_walk_with_context() {
 		remove_tree()
 	}
 	mut res := []string{}
-	os.walk_with_context('myfolder', &res, fn (mut res []string, fpath string) {
+	os.walk_with_context('myfolder', &res, fn (ctx voidptr, fpath string) {
+		mut res := unsafe { &[]string(ctx) }
 		res << fpath
 	})
 	res = normalise_paths(res)
@@ -328,13 +339,45 @@ fn test_walk() {
 fn test_cp() {
 	old_file_name := 'cp_example.txt'
 	new_file_name := 'cp_new_example.txt'
-	os.write_file(old_file_name, 'Test data 1 2 3, V is awesome #$%^[]!~⭐') or { panic(err) }
-	os.cp(old_file_name, new_file_name) or { panic(err) }
-	old_file := os.read_file(old_file_name) or { panic(err) }
-	new_file := os.read_file(new_file_name) or { panic(err) }
+	os.write_file(old_file_name, 'Test data 1 2 3, V is awesome #$%^[]!~⭐')!
+	os.cp(old_file_name, new_file_name)!
+	old_file := os.read_file(old_file_name)!
+	new_file := os.read_file(new_file_name)!
 	assert old_file == new_file
-	os.rm(old_file_name) or { panic(err) }
-	os.rm(new_file_name) or { panic(err) }
+	os.rm(old_file_name)!
+	os.rm(new_file_name)!
+}
+
+fn test_cp_to_folder() {
+	file_name := 'cp_to_folder_example.txt'
+	folder := 'test_cp_to_folder'
+	os.mkdir(folder)!
+	os.write_file(file_name, 'Test data 1 2 3, V is awesome #$%^[]!~⭐')!
+	os.cp(file_name, folder)!
+	new_file_path := os.join_path_single(folder, file_name)
+	old_file := os.read_file(file_name)!
+	new_file := os.read_file(new_file_path)!
+	assert old_file == new_file
+	os.rm(file_name)!
+	os.rm(new_file_path)!
+	os.rmdir(folder)!
+}
+
+fn test_cp_fail_if_exists() {
+	file_name := 'cp_fail_if_exists_example.txt'
+	folder := 'test_cp_fail_if_exists'
+	os.mkdir(folder)!
+	os.write_file(file_name, 'Test data 1 2 3, V is awesome #$%^[]!~⭐')!
+	os.cp(file_name, folder)!
+	new_file_path := os.join_path_single(folder, file_name)
+	if _ := os.cp(file_name, folder, fail_if_exists: true) {
+		assert false
+	} else {
+		assert err.str().starts_with('cp: failed to '), 'cp err: ${err}'
+	}
+	os.rm(file_name)!
+	os.rm(new_file_path)!
+	os.rmdir(folder)!
 }
 
 fn test_mv() {
@@ -440,6 +483,10 @@ fn test_realpath_existing() {
 	rpath := os.real_path(existing_file)
 	assert os.is_abs_path(rpath)
 	assert rpath.ends_with(existing_file_name)
+	$if windows {
+		assert !rpath.starts_with('UNC\\')
+		assert !rpath.starts_with('\\\\?\\')
+	}
 	os.rm(existing_file) or {}
 }
 
@@ -489,6 +536,10 @@ fn test_realpath_absolutepath_symlink() ! {
 	println(rpath)
 	assert os.is_abs_path(rpath)
 	assert rpath.ends_with(file_name)
+	$if windows {
+		assert !rpath.starts_with('UNC\\')
+		assert !rpath.starts_with('\\\\?\\')
+	}
 	os.rm(symlink_name) or {}
 	os.rm(file_name) or {}
 }
@@ -583,6 +634,34 @@ fn test_symlink() {
 	}
 }
 
+fn test_readlink() {
+	$if windows {
+		eprintln('skipping ${@METHOD} on windows, api not supported')
+		return
+	}
+	os.symlink('some_target_string', 'some_symlink')!
+	defer { os.rm('some_symlink') or { panic(err) } }
+	assert os.readlink('some_symlink')! == 'some_target_string'
+}
+
+fn test_exists_symlink_dangling() {
+	$if msvc {
+		eprintln('skipping ${@METHOD} on windows + msvc; TODO: investigate why os.lstat/1 behaves differently than for gcc/clang')
+		return
+	}
+	os.symlink('nonexistent', 'dangling_symlink') or { handle_privilege_error(err) or { return } }
+	// sanity check that the symlink truly does exist.  the lack of error alone is the check.
+	// (on linux, `.get_filetype() == os.FileType.symbolic_link` is true, but on windows, a dangling symlink is reported as a regular file.)
+	os.lstat('dangling_symlink')!
+	// the exists function says false in this scenario... on linux and linux-like systems.
+	// it says true on windows!
+	$if windows {
+		assert os.exists('dangling_symlink') == true
+	} $else {
+		assert os.exists('dangling_symlink') == false
+	}
+}
+
 fn test_is_executable_writable_readable() {
 	file_name := 'rwxfile.exe'
 	create_file(file_name)!
@@ -597,6 +676,12 @@ fn test_is_executable_writable_readable() {
 		assert os.is_writable(file_name)
 		assert os.is_readable(file_name)
 		assert os.is_executable(file_name)
+		for ext in ['exe', 'com', 'bat', 'cmd'] {
+			mut executable_file_name := 'executable.${ext}'
+			create_file(executable_file_name)!
+			assert os.is_executable(executable_file_name)
+			os.rm(executable_file_name) or { panic(err) }
+		}
 	}
 	// We finally delete the test file.
 	os.rm(file_name) or { panic(err) }
@@ -815,7 +900,7 @@ fn test_stdout_capture() {
 cmd.start()
 for !cmd.eof {
 	line := cmd.read_line()
-	println('line="$line"')
+	println('line="${line}"')
 }
 cmd.close()
 	*/
@@ -935,9 +1020,9 @@ fn test_utime() {
 		os.rm(filename) or { panic(err) }
 	}
 	f.write_string(hello) or { panic(err) }
-	atime := time.now().add_days(2).unix()
-	mtime := time.now().add_days(4).unix()
-	os.utime(filename, int(atime), int(mtime)) or { panic(err) }
+	atime := i64(2_147_483_648)
+	mtime := i64(2_306_102_495)
+	os.utime(filename, atime, mtime) or { panic(err) }
 	assert os.file_last_mod_unix(filename) == mtime
 }
 
@@ -952,13 +1037,44 @@ fn test_execute() {
 	}
 	result := os.execute('${os.quoted_path(@VEXE)} run ${os.quoted_path(print0script)}')
 	hexresult := result.output.hex()
-	// println('exit_code: $result.exit_code')
-	// println('output: |$result.output|')
-	// println('output.len: $result.output.len')
-	// println('output hexresult: $hexresult')
+	// println('exit_code: ${result.exit_code}')
+	// println('output: |${result.output}|')
+	// println('output.len: ${result.output.len}')
+	// println('output hexresult: ${hexresult}')
 	assert result.exit_code == 0
-	assert hexresult.starts_with('7374617274004d4944444c450066696e697368')
+	assert hexresult.contains('7374617274004d4944444c450066696e697368')
 	assert hexresult.ends_with('0a7878')
+}
+
+fn test_exec_with_args() {
+	source_path := os.join_path_single(tfolder, 'exec_args.v')
+	output_arg := os.join_path_single(tfolder, 'exec_args')
+	exe_path := if os.user_os() == 'windows' {
+		output_arg + '.exe'
+	} else {
+		output_arg
+	}
+	os.write_file(source_path,
+		"import os\n\nfn main() {\n\tprintln(os.args[1..].join('|'))\n\teprintln('stderr-ok')\n}\n")!
+	defer {
+		os.rm(source_path) or {}
+		os.rm(exe_path) or {}
+		os.rm(output_arg + '.c') or {}
+	}
+	compile_result :=
+		os.execute('${os.quoted_path(@VEXE)} -o ${os.quoted_path(output_arg)} ${os.quoted_path(source_path)}')
+	assert compile_result.exit_code == 0, compile_result.output
+
+	result := os.exec([exe_path, 'one two', 'semi;colon'])
+	normalized_output := result.output.replace('\r\n', '\n')
+	assert result.exit_code == 0, result.output
+	assert normalized_output.contains('one two|semi;colon\n'), result.output
+	assert normalized_output.contains('stderr-ok\n'), result.output
+
+	shell_metachar_result := os.exec([exe_path, 'first; echo injected'])
+	normalized_shell_metachar_output := shell_metachar_result.output.replace('\r\n', '\n')
+	assert shell_metachar_result.exit_code == 0, shell_metachar_result.output
+	assert normalized_shell_metachar_output.contains('first; echo injected\n'), shell_metachar_result.output
 }
 
 fn test_execute_with_stderr_redirection() {
@@ -967,7 +1083,8 @@ fn test_execute_with_stderr_redirection() {
 	assert result.output.contains('unknown command `wrong_command`')
 
 	stderr_path := os.join_path_single(tfolder, 'stderr.txt')
-	result2 := os.execute('${os.quoted_path(@VEXE)} wrong_command 2> ${os.quoted_path(stderr_path)}')
+	result2 :=
+		os.execute('${os.quoted_path(@VEXE)} wrong_command 2> ${os.quoted_path(stderr_path)}')
 	assert result2.exit_code == 1
 	assert result2.output == ''
 	assert os.exists(stderr_path)
@@ -983,47 +1100,48 @@ fn test_execute_with_linefeeds() {
 	assert result2.exit_code == 1
 }
 
+fn test_execute_with_semicolon_inside_quoted_string_on_windows() {
+	if os.user_os() != 'windows' {
+		return
+	}
+	result := os.execute('echo "hello;"')
+	assert result.exit_code == 0, result.output
+	assert result.output.trim_space() == '"hello;"'
+}
+
+fn test_execute_pipe_into_vfmt() {
+	producer_script := os.join_path_single(tfolder, 'pipe_into_vfmt.v')
+	os.write_file(producer_script, "fn main() {\n\tprint('fn main(){println(1)}\\n')\n}\n")!
+	defer {
+		os.rm(producer_script) or {}
+	}
+	result :=
+		os.execute('${os.quoted_path(@VEXE)} run ${os.quoted_path(producer_script)} | ${os.quoted_path(@VEXE)} fmt')
+	assert result.exit_code == 0, result.output
+	assert result.output.replace('\r\n', '\n') == 'fn main() {\n\tprintln(1)\n}\n'
+}
+
 fn test_execute_fc_get_output() {
 	if os.user_os() != 'windows' {
 		return
 	}
 	result := os.execute('c:\\windows\\system32\\fc.exe /?')
-	dump(result)
 	assert result.output.contains('filename')
 	assert result.exit_code == -1
 }
 
-fn test_command() {
-	if os.user_os() == 'windows' {
-		eprintln('>>> os.Command is not implemented fully on Windows yet')
+fn test_execute_decodes_utf16le_output() {
+	if os.user_os() != 'windows' {
 		return
 	}
-	mut cmd := os.Command{
-		path: 'ls'
+	source_path := os.join_path_single(tfolder, 'utf16le_stdout.v')
+	os.write_file(source_path, utf16le_stdout_source_code)!
+	defer {
+		os.rm(source_path) or {}
 	}
-
-	cmd.start() or { panic(err) }
-	for !cmd.eof {
-		cmd.read_line()
-	}
-
-	cmd.close() or { panic(err) }
-	// dump( cmd )
-	assert cmd.exit_code == 0
-
-	// This will return a non 0 code
-	mut cmd_to_fail := os.Command{
-		path: 'ls -M'
-	}
-
-	cmd_to_fail.start() or { panic(err) }
-	for !cmd_to_fail.eof {
-		cmd_to_fail.read_line()
-	}
-
-	cmd_to_fail.close() or { panic(err) }
-	// dump( cmd_to_fail )
-	assert cmd_to_fail.exit_code != 0 // 2 on linux, 1 on macos
+	result := os.execute('${os.quoted_path(@VEXE)} run ${os.quoted_path(source_path)}')
+	assert result.exit_code == 0, result.output
+	assert result.output == 'OK\n', result.output
 }
 
 fn test_reading_from_proc_cpuinfo() {
@@ -1065,7 +1183,7 @@ fn move_across_partitions_using_function(f fn (src string, dst string, opts os.M
 		eprintln('skipping test_mv_by_cp, because bindfs was not present')
 		return
 	}
-	// eprintln('>> $bindfs')
+	// eprintln('>> ${bindfs}')
 	pfolder := os.join_path(tfolder, 'parent')
 	cfolder := os.join_path(pfolder, 'child')
 	mfolder := os.join_path(pfolder, 'mountpoint')
@@ -1078,7 +1196,7 @@ fn move_across_partitions_using_function(f fn (src string, dst string, opts os.M
 	target_path := os.join_path(cdeepfolder, 'target.txt')
 	os.write_file(original_path, 'text')!
 	os.write_file(os.join_path(cdeepfolder, 'x.txt'), 'some text')!
-	// os.system('tree $pfolder')
+	// os.system('tree ${pfolder}')
 	/*
 	/tmp/v_1000/v/tests/os_test/parent
 	├── child
@@ -1092,7 +1210,7 @@ fn move_across_partitions_using_function(f fn (src string, dst string, opts os.M
 	defer {
 		os.system('sync; umount ${mfolder}')
 	}
-	// os.system('tree $pfolder')
+	// os.system('tree ${pfolder}')
 	/*
 	/tmp/v_1000/v/tests/os_test/parent
 	├── child

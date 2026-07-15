@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: '0 */6 * * *'
   push:
+    branches:
+      - master
     paths:
       - '**/periodic_ci.yml'
   pull_request:
@@ -19,7 +21,7 @@ jobs:
             cc: tcc
           - os: windows-latest
             cc: msvc
-          - os: macos-13
+          - os: macos-latest
             cc: clang
       fail-fast: false
     runs-on: ${{ matrix.os }}
@@ -29,12 +31,12 @@ jobs:
       VFLAGS: -cc ${{ matrix.cc }}
       V_CI_PERIODIC: 1
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build
         if: runner.os != 'Windows'
         run: make -j4 && ./v -showcc -o v cmd/v && ./v doctor
       - name: Build V (Windows)
         if: runner.os == 'Windows'
-        run: ./make.bat -msvc && ./v -o v2.exe cmd/v && ./v2 -showcc -o v.exe cmd/v && ./v doctor
+        run: ./makev.bat -msvc && ./v -o v2.exe cmd/v && ./v2 -showcc -o v.exe cmd/v && ./v doctor
       - name: Test
         run: ./v -d network -silent test-self vlib/net

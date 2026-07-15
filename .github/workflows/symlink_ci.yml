@@ -3,6 +3,8 @@ name: Symlink CI
 on:
   workflow_dispatch:
   push:
+    branches:
+      - master
     paths:
       - 'cmd/tools/vsymlink/**.v'
       - '.github/workflows/symlink_ci.yml'
@@ -20,10 +22,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-24.04, macos-13]
+        os: [ubuntu-latest, macos-latest]
       fail-fast: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build V
         run: make -j4
       - name: Symlink
@@ -64,9 +66,9 @@ jobs:
         flags: ['', '-githubci']
       fail-fast: false
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Build V
-        run: ./make.bat
+        run: ./makev.bat
       - name: Symlink
         run: ./v symlink ${{ matrix.flags }}
       - name: Check if V is usable

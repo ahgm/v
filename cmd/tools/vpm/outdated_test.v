@@ -1,4 +1,5 @@
 // vtest retry: 3
+// vtest build: !windows
 module main
 
 import os
@@ -12,10 +13,10 @@ fn testsuite_begin() {
 		eprintln('> skipping ${@FILE}, when `-d network` is missing')
 		exit(0)
 	}
+	dump(test_path)
 	test_utils.set_test_env(test_path)
 	os.mkdir_all(test_path)!
 	os.chdir(test_path)!
-	println('test_path: ${test_path}')
 }
 
 fn testsuite_end() {
@@ -32,6 +33,9 @@ fn test_is_outdated_git_module() {
 }
 
 fn test_is_outdated_hg_module() {
+	$if !check_mercurial_works ? {
+		return
+	}
 	os.find_abs_path_of_executable('hg') or {
 		eprintln('skipping test, since `hg` is not executable.')
 		return
@@ -49,7 +53,7 @@ fn test_outdated() {
 		cmd_ok(@LOCATION, '${vexe} install ${m}')
 	}
 	// "Outdate" previously installed. Leave out `libsodium`.
-	for m in ['pcre', 'vtray', os.join_path('nedpals', 'args')] {
+	for m in ['pcre', os.join_path('spytheman', 'vtray'), os.join_path('nedpals', 'args')] {
 		cmd_ok(@LOCATION, 'git -C ${m} fetch --all')
 		cmd_ok(@LOCATION, 'git -C ${m} reset --hard HEAD~')
 		assert is_outdated(m)
@@ -58,7 +62,7 @@ fn test_outdated() {
 	output := res.output.all_after('Outdated modules:')
 	assert output.len > 0, output
 	assert output.contains('pcre'), output
-	assert output.contains('vtray'), output
+	assert output.contains('spytheman.vtray'), output
 	assert output.contains('nedpals.args'), output
 	assert !output.contains('libsodium'), output
 }

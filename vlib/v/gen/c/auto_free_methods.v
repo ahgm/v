@@ -7,6 +7,9 @@ import strings
 
 @[inline]
 fn (mut g Gen) register_free_method(typ ast.Type) {
+	if g.type_has_unresolved_generic_parts(typ) {
+		return
+	}
 	if typ.has_flag(.shared_f) {
 		g.get_free_method(typ.clear_flag(.shared_f).set_nr_muls(0))
 	} else {
@@ -36,6 +39,9 @@ fn (mut g Gen) get_free_method(typ ast.Type) string {
 
 fn (mut g Gen) gen_free_methods() {
 	for typ, _ in g.autofree_methods {
+		if g.type_has_unresolved_generic_parts(typ) {
+			continue
+		}
 		g.gen_free_method(typ)
 	}
 }
@@ -43,11 +49,20 @@ fn (mut g Gen) gen_free_methods() {
 fn (mut g Gen) gen_free_method(typ ast.Type) string {
 	styp := g.styp(typ).replace('*', '')
 	mut fn_name := styp_to_free_fn_name(styp)
+	if g.type_has_unresolved_generic_parts(typ) {
+		return fn_name
+	}
 	deref_typ := if typ.has_flag(.option) { typ } else { typ.set_nr_muls(0) }
 	if deref_typ in g.generated_free_methods {
 		return fn_name
 	}
+	// Also check by C function name to prevent duplicate definitions when
+	// different type IDs map to the same C name (e.g. nested array types).
+	if fn_name in g.generated_free_fn_names {
+		return fn_name
+	}
 	g.generated_free_methods[deref_typ] = true
+	g.generated_free_fn_names[fn_name] = true
 
 	objtyp := g.unwrap_generic(typ)
 	mut sym := g.table.sym(objtyp)
@@ -62,7 +77,7 @@ fn (mut g Gen) gen_free_method(typ ast.Type) string {
 
 	match mut sym.info {
 		ast.Struct {
-			g.gen_free_for_struct(objtyp, sym.info, styp, fn_name)
+			g.gen_free_for_struct(objtyp, sym.info, styp, fn_name, sym.is_builtin())
 		}
 		ast.Array {
 			g.gen_free_for_array(sym.info, styp, fn_name)
@@ -73,6 +88,9 @@ fn (mut g Gen) gen_free_method(typ ast.Type) string {
 		ast.Interface {
 			g.gen_free_for_interface(sym, sym.info, styp, fn_name)
 		}
+		ast.SumType {
+			g.gen_free_for_sumtype(sym.info, styp, fn_name)
+		}
 		else {
 			println(g.table.type_str(typ))
 			// print_backtrace()
@@ -80,6 +98,7 @@ fn (mut g Gen) gen_free_method(typ ast.Type) string {
 			// verror("could not generate free method '${fn_name}' for type '${styp}'")
 		}
 	}
+
 	return fn_name
 }
 
@@ -100,12 +119,88 @@ fn (mut g Gen) gen_free_for_interface(sym ast.TypeSymbol, info ast.Interface, st
 			continue
 		}
 		type_styp := g.gen_type_name_for_free_call(typ_)
-		fn_builder.writeln('\tif (it->_typ == _${sym.cname}_${sub_sym.cname}_index) { ${type_styp}_free(it->_${sub_sym.cname}); return; }')
+		free_fn_name := if sub_sym.is_builtin() {
+			'builtin__${type_styp}_free'
+		} else {
+			'${type_styp}_free'
+		}
+		fn_builder.writeln('\tif (it->_typ == _${sym.cname}_${sub_sym.cname}_index) { ${free_fn_name}(it->_${sub_sym.cname}); return; }')
 	}
 	fn_builder.writeln('}')
 }
 
-fn (mut g Gen) gen_free_for_struct(typ ast.Type, info ast.Struct, styp string, fn_name string) {
+fn (mut g Gen) gen_free_for_sumtype(info ast.SumType, styp string, fn_name string) {
+	g.definitions.writeln('${g.static_non_parallel}void ${fn_name}(${styp}* it);')
+	mut fn_builder := strings.new_builder(256)
+	defer {
+		g.auto_fn_definitions << fn_builder.str()
+	}
+	fn_builder.writeln('${g.static_non_parallel}void ${fn_name}(${styp}* it) {')
+	mut idxs := []ast.Type{}
+	for variant in info.variants {
+		if variant in idxs {
+			continue
+		}
+		idxs << variant
+		free_typ := variant.clear_flag(.option)
+		free_sym := g.table.sym(g.unwrap_generic(free_typ))
+		variant_name := g.get_sumtype_variant_name(variant, free_sym)
+		variant_ptr := 'it->_${variant_name}'
+		fn_builder.writeln('\tif (it->_typ == ${g.type_sidx(variant)}) {')
+		if variant.has_flag(.option) {
+			match free_sym.kind {
+				.string {
+					fn_builder.writeln('\t\tif (${variant_ptr}->state != 2) {')
+					fn_builder.writeln('\t\t\tbuiltin__string_free((${g.base_type(variant)}*)${variant_ptr}->data);')
+					fn_builder.writeln('\t\t}')
+				}
+				.array, .map, .struct, .sum_type, .interface {
+					mut free_fn_name := if free_sym.has_method('free') {
+						'${g.gen_type_name_for_free_call(free_typ)}_free'
+					} else {
+						g.gen_free_method(free_typ)
+					}
+					if free_sym.is_builtin() {
+						free_fn_name = 'builtin__${free_fn_name}'
+					}
+					fn_builder.writeln('\t\tif (${variant_ptr}->state != 2) {')
+					fn_builder.writeln('\t\t\t${free_fn_name}((${g.base_type(variant)}*)${variant_ptr}->data);')
+					fn_builder.writeln('\t\t}')
+				}
+				else {}
+			}
+		} else {
+			match free_sym.kind {
+				.string {
+					fn_builder.writeln('\t\tbuiltin__string_free(${variant_ptr});')
+				}
+				.array, .map, .struct, .sum_type, .interface {
+					mut free_fn_name := if free_sym.has_method('free') {
+						'${g.gen_type_name_for_free_call(free_typ)}_free'
+					} else {
+						g.gen_free_method(free_typ)
+					}
+					if free_sym.is_builtin() {
+						free_fn_name = 'builtin__${free_fn_name}'
+					}
+					fn_builder.writeln('\t\t${free_fn_name}(${variant_ptr});')
+				}
+				else {}
+			}
+		}
+		// Sumtypes box their active payload in heap memory via memdup/HEAP.
+		fn_builder.writeln('\t\tbuiltin___v_free(${variant_ptr});')
+		fn_builder.writeln('\t\treturn;')
+		fn_builder.writeln('\t}')
+	}
+	fn_builder.writeln('}')
+}
+
+fn (mut g Gen) gen_free_for_struct(typ ast.Type, info ast.Struct, styp string, ofn_name string, sym_is_builtin bool) {
+	mut fn_name := ofn_name
+	if sym_is_builtin {
+		fn_name = 'builtin__${fn_name}'
+	}
 	g.definitions.writeln('${g.static_non_parallel}void ${fn_name}(${styp}* it);')
 	mut fn_builder := strings.new_builder(128)
 	defer {
@@ -116,15 +211,23 @@ fn (mut g Gen) gen_free_for_struct(typ ast.Type, info ast.Struct, styp string, f
 		field_name := c_name(field.name)
 		sym := g.table.sym(g.unwrap_generic(field.typ))
 
-		if sym.kind !in [.string, .array, .map, .struct] {
+		if sym.kind !in [.string, .array, .map, .struct, .sum_type] {
 			continue
 		}
 		field_styp := g.gen_type_name_for_free_call(field.typ)
 		is_struct_option := typ.has_flag(.option)
-		field_styp_fn_name := if sym.has_method('free') {
+		free_method_typ := if field.typ.has_flag(.shared_f) {
+			field.typ.clear_flag(.shared_f).set_nr_muls(0)
+		} else {
+			field.typ
+		}
+		mut field_styp_fn_name := if sym.has_method('free') {
 			'${field_styp}_free'
 		} else {
-			g.gen_free_method(field.typ)
+			g.gen_free_method(free_method_typ)
+		}
+		if sym.is_builtin() {
+			field_styp_fn_name = 'builtin__${field_styp_fn_name}'
 		}
 		is_field_option := field.typ.has_flag(.option)
 		expects_opt := field_styp_fn_name.starts_with('_option_')
@@ -160,7 +263,8 @@ fn (mut g Gen) gen_free_for_struct(typ ast.Type, info ast.Struct, styp string, f
 				fn_builder.writeln('\t\t${field_styp_fn_name}((${opt_field_styp}*)&(it->${field_name}${suffix}));')
 				fn_builder.writeln('\t}')
 			} else {
-				fn_builder.writeln('\t${field_styp_fn_name}(&(it->${field_name}));')
+				prefix := if field.typ.is_ptr() { '' } else { '&' }
+				fn_builder.writeln('\t${field_styp_fn_name}(${prefix}(it->${field_name}));')
 			}
 		}
 	}
@@ -184,19 +288,22 @@ fn (mut g Gen) gen_free_for_array(info ast.Array, styp string, fn_name string) {
 	fn_builder.writeln('${g.static_non_parallel}void ${fn_name}(${styp}* it) {')
 
 	sym := g.table.sym(g.unwrap_generic(info.elem_type))
-	if sym.kind in [.string, .array, .map, .struct] {
-		fn_builder.writeln('\tfor (int i = 0; i < it->len; i++) {')
+	if sym.kind in [.string, .array, .map, .struct, .sum_type] {
+		fn_builder.writeln('\tfor (${ast.int_type_name} i = 0; i < it->len; i++) {')
 
 		mut elem_styp := g.styp(info.elem_type).replace('*', '')
-		elem_styp_fn_name := if sym.has_method('free') {
+		mut elem_styp_fn_name := if sym.has_method('free') {
 			'${elem_styp}_free'
 		} else {
 			g.gen_free_method(info.elem_type)
 		}
+		if sym.is_builtin() {
+			elem_styp_fn_name = 'builtin__${elem_styp_fn_name}'
+		}
 		fn_builder.writeln('\t\t${elem_styp_fn_name}(&(((${elem_styp}*)it->data)[i]));')
 		fn_builder.writeln('\t}')
 	}
-	fn_builder.writeln('\tarray_free(it);')
+	fn_builder.writeln('\tbuiltin__array_free(it);')
 	fn_builder.writeln('}')
 }
 
@@ -210,10 +317,10 @@ fn (mut g Gen) gen_free_for_map(typ ast.Type, styp string, fn_name string) {
 
 	if typ.has_flag(.option) {
 		fn_builder.writeln('\tif (it->state != 2) {')
-		fn_builder.writeln('\t\tmap_free((map*)&it->data);')
+		fn_builder.writeln('\t\tbuiltin__map_free((map*)&it->data);')
 		fn_builder.writeln('\t}')
 	} else {
-		fn_builder.writeln('\tmap_free(it);')
+		fn_builder.writeln('\tbuiltin__map_free(it);')
 	}
 	fn_builder.writeln('}')
 }

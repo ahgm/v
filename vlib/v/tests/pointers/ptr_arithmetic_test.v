@@ -20,20 +20,20 @@ fn test_ptr_arithmetic() {
 
 fn test_ptr_arithmetic_over_byteptr() {
 	// byteptr, voidptr, charptr are handled differently
-	mut q := &u8(10)
+	mut q := unsafe { &u8(10) }
 	unsafe {
 		q -= 2
 		q = q + 1
 	}
-	assert u64(q) == u64(&u8(9))
+	assert u64(q) == u64(unsafe { &u8(9) })
 	s := unsafe { q - 1 }
-	assert u64(s) == u64(&u8(8))
+	assert u64(s) == u64(unsafe { &u8(8) })
 	unsafe {
 		q++
 		q++
 		q--
 	}
-	assert u64(q) == u64(&u8(10))
+	assert u64(q) == u64(unsafe { &u8(10) })
 }
 
 struct Abc {
@@ -67,4 +67,29 @@ fn test_ptr_arithmetic_over_struct() {
 		pa -= 2
 	}
 	assert pa == unsafe { &a[0] }
+}
+
+fn test_ptr_infix_arithmetic_over_struct() {
+	mut a := [3]Abc{}
+	a[0].x = 10
+	a[1].x = 100
+	a[2].x = 1000
+	unsafe {
+		pa := &a[0]
+		next := pa + 1
+		assert next.x == 100
+		last := next + 1
+		assert last.x == 1000
+		back := last - 2
+		assert back.x == 10
+
+		refs := [&a[0], &a[1], &a[2]]
+		ppa := &refs[0]
+		next_ptr := ppa + 1
+		assert (*next_ptr).x == 100
+		last_ptr := next_ptr + 1
+		assert (*last_ptr).x == 1000
+		back_ptr := last_ptr - 2
+		assert (*back_ptr).x == 10
+	}
 }

@@ -2,7 +2,10 @@ name: CI macOS
 
 on:
   push:
+    branches:
+      - master
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/macos_ci.yml'
@@ -10,6 +13,7 @@ on:
       - '!cmd/tools/builders/**.v'
   pull_request:
     paths-ignore:
+      - 'vlib/v3/**'
       - '**.md'
       - '**.yml'
       - '!**/macos_ci.yml'
@@ -27,13 +31,66 @@ jobs:
         os: [macos-14]
       fail-fast: false
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 121
+    timeout-minutes: 151
     env:
       VFLAGS: -cc clang
+      VTEST_SHOW_LONGEST_BY_RUNTIME: 3
+      VTEST_SHOW_LONGEST_BY_COMPTIME: 3
+      VTEST_SHOW_LONGEST_BY_TOTALTIME: 3
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - name: Cache Homebrew downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/Library/Caches/Homebrew
+          key: brew-${{ matrix.os }}-${{ hashFiles('.github/workflows/macos_ci.yml', 'ci/macos_ci.vsh') }}
+          restore-keys: |
+            brew-${{ matrix.os }}-
       - name: Build V
         run: make -j4 && ./v symlink
+      - name: Legacy gg import multiwindow isolation
+        run: ./v test vlib/gg/legacy_import_multiwindow_isolation_test.v
+      - name: Multiwindow Metal smoke
+        run: ./v -d gg_multiwindow -d sokol_metal test vlib/x/multiwindow vlib/gg/multiwindow_api_d_gg_multiwindow_test.v vlib/gg/frame_pacing_test.v vlib/gg/draw_fns_api_test.v vlib/gg/draw_rect_empty_test.v
+      - name: Test AppKit GLCore rejection guard
+        run: ./v -d gg_multiwindow -d darwin_sokol_glcore33 test vlib/x/multiwindow/multiwindow_test.v
+      - name: Compile gg multiwindow example with Metal
+        run: ./v -d gg_multiwindow -d sokol_metal -o /tmp/gg_multiwindow_metal examples/gg/multiwindow.v
+      - name: Run gg multiwindow example with Metal
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import sys
+
+          proc = subprocess.Popen(['/tmp/gg_multiwindow_metal'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+          timed_out = False
+          try:
+              stdout, stderr = proc.communicate(timeout=12)
+          except subprocess.TimeoutExpired:
+              timed_out = True
+              proc.kill()
+              stdout, stderr = proc.communicate()
+
+          print('::group::gg multiwindow Metal stdout')
+          print(stdout, end='')
+          print('::endgroup::')
+          print('::group::gg multiwindow Metal stderr')
+          print(stderr, end='')
+          print('::endgroup::')
+
+          for marker in ['gg multi-window backend:', 'live windows:', 'window created:']:
+              if marker not in stdout:
+                  print(f'Missing expected output marker: {marker}', file=sys.stderr)
+                  sys.exit(1)
+
+          if timed_out:
+              print('Metal example reached the controlled timeout after producing expected launch logs.')
+              sys.exit(0)
+
+          if proc.returncode != 0:
+              print(f'Metal example exited with {proc.returncode}.', file=sys.stderr)
+              sys.exit(proc.returncode)
+          PY
       - name: Test symlink
         run: v run ci/macos_ci.vsh test_symlink
       - name: v doctor
@@ -42,6 +99,8 @@ jobs:
         run: v run ci/macos_ci.vsh build_v_with_prealloc
       - name: Test cross compilation to Linux
         run: v run ci/macos_ci.vsh test_cross_compilation
+      - name: Test inline assembly on macos
+        run: v run ci/macos_ci.vsh test_inline_assembly
       - name: Build V with -cstrict
         run: v run ci/macos_ci.vsh build_with_cstrict
       - name: All code is formatted

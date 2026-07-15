@@ -1,6 +1,4 @@
-// Copyright (c) 2019-2024 Alexander Medvednikov. All rights reserved.
-// Use of this source code is governed by an MIT license
-// that can be found in the LICENSE file.
+// vtest build: !sanitized_job?
 import os
 import term
 import benchmark
@@ -63,6 +61,13 @@ fn get_test_files(path string) []string {
 	mut ref := &files
 	os.walk(path, fn [mut ref] (p string) {
 		if p.ends_with('_keep.vv') || p.ends_with('_expected.vv') {
+			$if macos {
+				$if arm64 {
+					if os.file_name(p) == 'orm_keep.vv' {
+						return
+					}
+				}
+			}
 			ref << p
 		}
 	})

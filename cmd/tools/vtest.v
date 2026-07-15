@@ -40,8 +40,7 @@ fn main() {
 	for targ in args_after {
 		if os.is_dir(targ) {
 			// Fetch all tests from the directory
-			files, skip_files := ctx.should_test_dir(targ.trim_right(os.path_separator),
-				backend)
+			files, skip_files := ctx.should_test_dir(targ.trim_right(os.path_separator), backend)
 			ts.files << files
 			ts.skip_files << skip_files
 			continue
@@ -130,26 +129,6 @@ enum ShouldTestStatus {
 }
 
 fn (mut ctx Context) should_test(path string, backend string) ShouldTestStatus {
-	if path.ends_with('mysql_orm_test.v') {
-		testing.find_started_process('mysqld') or { return .skip }
-	}
-	if path.ends_with('mysql_test.v') {
-		testing.find_started_process('mysqld') or { return .skip }
-	}
-	if path.ends_with('pg_orm_test.v') {
-		testing.find_started_process('postgres') or { return .skip }
-	}
-	if path.ends_with('pg_double_test.v') {
-		testing.find_started_process('postgres') or { return .skip }
-	}
-	if path.ends_with('onecontext_test.v') {
-		return .skip
-	}
-	$if tinyc {
-		if path.ends_with('naked_attr_test.amd64.v') {
-			return .skip
-		}
-	}
 	if path.ends_with('_test.v') {
 		return ctx.should_test_when_it_contains_matching_fns(path, backend)
 	}
@@ -192,7 +171,7 @@ fn (mut ctx Context) should_test(path string, backend string) ShouldTestStatus {
 	return .ignore
 }
 
-fn (mut ctx Context) should_test_when_it_contains_matching_fns(path string, backend string) ShouldTestStatus {
+fn (mut ctx Context) should_test_when_it_contains_matching_fns(path string, _backend string) ShouldTestStatus {
 	if ctx.run_only.len == 0 {
 		// no filters set, so just compile and test
 		return .test
@@ -220,7 +199,8 @@ fn (mut ctx Context) should_test_when_it_contains_matching_fns(path string, back
 
 fn extract_flag_bool(flag_name string, mut after []string, flag_default bool) bool {
 	mut res := flag_default
-	orig_after := after.clone() // workaround for after.filter() codegen bug, when `mut after []string`
+	orig_after :=
+		after.clone() // workaround for after.filter() codegen bug, when `mut after []string`
 	matches_after := orig_after.filter(it != flag_name)
 	if matches_after.len < after.len {
 		after = matches_after.clone()

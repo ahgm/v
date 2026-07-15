@@ -5,6 +5,8 @@ const compare_prod = '-prod' in os.args
 
 const cleanup_tmp = '-no-cleanup' !in os.args
 
+const fetch_remote = '-no-fetch' !in os.args
+
 fn gbranch() string {
 	return os.execute(r'git branch --list|grep ^\*').output.trim_left('* ').trim_space()
 }
@@ -73,10 +75,10 @@ fn hline(header_message string) {
 fn main() {
 	// The starting point, when this program should be started, is just after `gh pr checkout NUMBER`.
 	start := time.now()
-
 	pr_branch := gbranch()
-	hline('Current git branch: ${pr_branch}, commit: ${gcommit()}')
-	println('    Compiling new V executables from PR branch: ${pr_branch}, commit: ${gcommit()} ...')
+	pr_commit := gcommit()
+	hline('Current git branch: ${pr_branch}, commit: ${pr_commit}')
+	println('    Compiling new V executables from PR branch: ${pr_branch}, commit: ${pr_commit} ...')
 	// *not* using v self here is deliberate, so that the `v` executable itself, is not changed after running this script
 	xtime('./v     -o vnew1 cmd/v')
 	xtime('./vnew1 -o vnew2 cmd/v')
@@ -96,17 +98,23 @@ fn main() {
 	}
 	r('rm -rf vnew1 vnew2')
 
-	// make sure to always compare against the main V repo's master branch:
-	os.execute('git -C . remote add V_REPO https://github.com/vlang/v.git')
-	os.execute('git -C . fetch V_REPO')
-	os.execute('git branch -D v_repo_master')
-	os.execute('git branch -f --track v_repo_master V_REPO/master')
+	if fetch_remote {
+		// make sure to always compare against the main V repo's master branch by default:
+		os.execute('git -C . remote add V_REPO https://github.com/vlang/v.git')
+		os.execute('git -C . fetch V_REPO')
+		os.execute('git branch -D v_repo_master')
+		os.execute('git branch -f --track v_repo_master V_REPO/master')
+	}
+
 	r('git checkout v_repo_master')
 	master_branch := gbranch()
 	hline('    Compiling old V executables from branch: ${master_branch}, commit: ${gcommit()} ...')
+	// Use `make` to bootstrap the old V from the C sources on the master branch,
+	// because the new V compiler may have breaking changes that prevent it from
+	// compiling the old code directly.
+	xtime('make -j4')
 	xtime('./v     -o vold1 cmd/v')
-	xtime('./vold1 -o vold2 cmd/v')
-	xtime('./vold2 -no-parallel -o vold cmd/v')
+	xtime('./vold1 -no-parallel -o vold cmd/v')
 	xtime('./vold -no-parallel -o ohw_master.c examples/hello_world.v')
 	xtime('./vold -no-parallel -o ohw_master_gcc.c -cc gcc examples/hello_world.v')
 	xtime('./vold -no-parallel -o ov_master.c  cmd/v')
@@ -121,7 +129,7 @@ fn main() {
 	if compare_prod {
 		show_size('vold_prod')
 	}
-	r('rm -rf vold1 vold2')
+	r('rm -rf vold1')
 
 	hline('File sizes so far ...')
 	compare_size('ohw_master.c', 'nhw_current.c')

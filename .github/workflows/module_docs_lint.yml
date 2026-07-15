@@ -2,6 +2,8 @@ name: Code CI vlib modules
 
 on:
   push:
+    branches:
+      - master
     paths:
       - '**/cmd/tools/vdoc/theme/**'
   pull_request:
@@ -12,7 +14,7 @@ jobs:
   lint-module-docs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Check Formatting
         uses: creyD/prettier_action@v4.6
         with:

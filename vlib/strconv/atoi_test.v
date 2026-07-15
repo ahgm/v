@@ -83,8 +83,8 @@ fn test_atoi() {
 		StrInt{'123_456_789', 123456789},
 		StrInt{'00000006', 6},
 		StrInt{'0_0_0_0_0_0_0_6', 6},
-		StrInt{'2147483647', max_int},
-		StrInt{'-2147483648', min_int},
+		StrInt{'2147483647', max_i32},
+		StrInt{'-2147483648', min_i32},
 	]
 
 	// Check that extracted int value matches its string.
@@ -325,7 +325,7 @@ fn test_parse_int() {
 	assert strconv.parse_int('2147483648', 10, 32)! == 2147483647
 	assert strconv.parse_int('9223372036854775807', 10, 64)! == 9223372036854775807
 	assert strconv.parse_int('9223372036854775808', 10, 64)! == 9223372036854775807
-	assert strconv.parse_int('baobab', 36, 64)? == 683058467
+	assert strconv.parse_int('baobab', 36, 64)! == 683058467
 	// Invalid bit sizes
 	if x := strconv.parse_int('123', 10, -1) {
 		println(x)
@@ -339,6 +339,13 @@ fn test_parse_int() {
 	} else {
 		assert true
 	}
+}
+
+fn test_common_parse_int_error_on_high_digit() {
+	assert strconv.common_parse_int('9223372036854775808', 0, 64, false, true) or { 1 } == 1
+	assert strconv.common_parse_int('-9223372036854775809', 0, 64, false, true) or { 1 } == 1
+	assert strconv.common_parse_int('9223372036854775808', 0, 64, false, false) or { 1 } == max_i64
+	assert strconv.common_parse_int('-9223372036854775809', 0, 64, false, false) or { 1 } == min_i64
 }
 
 fn test_common_parse_uint2() {

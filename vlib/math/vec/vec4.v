@@ -270,15 +270,23 @@ pub fn (v Vec4[T]) unit() Vec4[T] {
 	}
 }
 
-// perpendicular returns the `u` projected perpendicular vector to this vector.
+// perpendicular returns the `v` projected perpendicular vector to the 'u' vector.
 pub fn (v Vec4[T]) perpendicular(u Vec4[T]) Vec4[T] {
 	return v - v.project(u)
 }
 
 // project returns the projected vector.
+// The projection of vector `v` onto vector `u` is the orthogonal projection
+// of `v` onto a straight line parallel to `u` that passes through the origin.
+// This is equivalent to the vector projection of `v` onto the unit vector in the direction of `u`.
+// and is given by the formula: proj_v(u) = (v · u / |u|^2) * u
+// where "·" denotes the dot product and |u| is the magnitude of vector `u`.
+// If `v` is a zero vector, the result will also be a zero vector.
+// example:
+// TODO: add examples
 pub fn (v Vec4[T]) project(u Vec4[T]) Vec4[T] {
-	percent := v.dot(u) / u.dot(v)
-	return u.mul_scalar(percent)
+	scale := T(v.dot(u) / u.dot(u))
+	return u.mul_scalar(scale)
 }
 
 // eq returns a bool indicating if the two vectors are equal.
@@ -289,7 +297,7 @@ pub fn (v Vec4[T]) eq(u Vec4[T]) bool {
 
 // eq_epsilon returns a bool indicating if the two vectors are equal within the module `vec_epsilon` const.
 pub fn (v Vec4[T]) eq_epsilon(u Vec4[T]) bool {
-	return v.eq_approx[T, f32](u, vec_epsilon)
+	return v.eq_approx[T, T](u, T(vec_epsilon))
 }
 
 // eq_approx returns whether these vectors are approximately equal within `tolerance`.

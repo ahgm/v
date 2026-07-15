@@ -14,28 +14,34 @@ pub mut:
 	y int
 }
 
-__global can_show_color_on_stdout_cache = ?bool(none)
-__global can_show_color_on_stderr_cache = ?bool(none)
+__global can_show_color_on_stdout_cache = 0
+__global can_show_color_on_stderr_cache = 0
 
 // can_show_color_on_stdout returns true, if colors are allowed in stdout.
 // It returns false otherwise.
 pub fn can_show_color_on_stdout() bool {
-	if status := can_show_color_on_stdout_cache {
-		return status
+	match can_show_color_on_stdout_cache {
+		1 { return true }
+		-1 { return false }
+		else {}
 	}
+
 	status := supports_escape_sequences(1)
-	can_show_color_on_stdout_cache = status
+	can_show_color_on_stdout_cache = if status { 1 } else { -1 }
 	return status
 }
 
 // can_show_color_on_stderr returns true, if colors are allowed in stderr.
 // It returns false otherwise.
 pub fn can_show_color_on_stderr() bool {
-	if status := can_show_color_on_stderr_cache {
-		return status
+	match can_show_color_on_stderr_cache {
+		1 { return true }
+		-1 { return false }
+		else {}
 	}
+
 	status := supports_escape_sequences(2)
-	can_show_color_on_stderr_cache = status
+	can_show_color_on_stderr_cache = if status { 1 } else { -1 }
 	return status
 }
 
@@ -52,7 +58,7 @@ pub fn failed(s string) string {
 // If colors are not allowed, returns a given string.
 pub fn ok_message(s string) string {
 	if can_show_color_on_stdout() {
-		return green(' ${s} ')
+		return green('${s}')
 	}
 	return s
 }
@@ -60,14 +66,14 @@ pub fn ok_message(s string) string {
 // fail_message returns a colored string with red color.
 // If colors are not allowed, returns a given string.
 pub fn fail_message(s string) string {
-	return failed(' ${s} ')
+	return failed('${s}')
 }
 
 // warn_message returns a colored string with yellow color.
 // If colors are not allowed, returns a given string.
 pub fn warn_message(s string) string {
 	if can_show_color_on_stdout() {
-		return bright_yellow(' ${s} ')
+		return bright_yellow('${s}')
 	}
 	return s
 }

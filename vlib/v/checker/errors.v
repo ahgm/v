@@ -14,7 +14,8 @@ fn (mut c Checker) add_error_detail(s string) {
 }
 
 fn (mut c Checker) add_error_detail_with_pos(msg string, pos token.Pos) {
-	c.add_error_detail(util.formatted_error('details:', msg, c.file.path, pos))
+	file_path := if pos.file_idx < 0 { c.file.path } else { c.table.filelist[pos.file_idx] }
+	c.add_error_detail(util.formatted_error('details:', msg, file_path, pos))
 }
 
 fn (mut c Checker) add_instruction_for_option_type() {
@@ -27,9 +28,16 @@ fn (mut c Checker) add_instruction_for_result_type() {
 		c.table.cur_fn.return_type_pos)
 }
 
-fn (mut c Checker) warn(s string, pos token.Pos) {
-	allow_warnings := !(c.pref.is_prod || c.pref.warns_are_errors) // allow warnings only in dev builds
-	c.warn_or_error(s, pos, allow_warnings)
+@[params]
+pub struct MessageOptions {
+pub:
+	call_stack []errors.CallStackItem
+}
+
+fn (mut c Checker) warn(s string, pos token.Pos, options MessageOptions) {
+	// `-w` suppresses production warnings, but `-W` takes precedence when both are set.
+	allow_warnings := !c.pref.warns_are_errors && (c.pref.skip_warnings || !c.pref.is_prod)
+	c.warn_or_error(s, pos, allow_warnings, options)
 }
 
 fn (mut c Checker) warn_alloc(s string, pos token.Pos) {
@@ -42,13 +50,13 @@ fn (mut c Checker) warn_alloc(s string, pos token.Pos) {
 	}
 }
 
-fn (mut c Checker) error(message string, pos token.Pos) {
+fn (mut c Checker) error(message string, pos token.Pos, options MessageOptions) {
 	if (c.pref.translated || c.file.is_translated) && message.starts_with('mismatched types') {
 		// TODO: move this
 		return
 	}
 	mut msg := message.replace('`Array_', '`[]')
-	if c.pref.is_vweb {
+	if c.pref.is_template { // set during veb template checking
 		// Show in which veb action the error occurred (for easier debugging)
 		veb_action := c.table.cur_fn.name.replace('veb_tmpl_', '')
 		mut j := 0
@@ -60,24 +68,20 @@ fn (mut c Checker) error(message string, pos token.Pos) {
 		}
 		msg += ' (veb action: ${veb_action[..j]})'
 	}
-	c.warn_or_error(msg, pos, false)
+	c.warn_or_error(msg, pos, false, options)
 }
 
-fn (mut c Checker) fatal(message string, pos token.Pos) {
+fn (mut c Checker) fatal(message string, pos token.Pos, options MessageOptions) {
 	if (c.pref.translated || c.file.is_translated) && message.starts_with('mismatched types') {
 		// TODO: move this
 		return
 	}
 	msg := message.replace('`Array_', '`[]')
 	c.pref.fatal_errors = true
-	c.warn_or_error(msg, pos, false)
+	c.warn_or_error(msg, pos, false, options)
 }
 
 fn (mut c Checker) note(message string, pos token.Pos) {
-	if c.pref.message_limit >= 0 && c.nr_notices >= c.pref.message_limit {
-		c.should_abort = true
-		return
-	}
 	if c.is_generated {
 		return
 	}
@@ -90,23 +94,27 @@ fn (mut c Checker) note(message string, pos token.Pos) {
 		c.error_details = []
 	}
 	// deduplicate notices for the same line
-	kpos := '${c.file.path}:${pos.line_nr}:${message}'
+	file_path := if pos.file_idx < 0 { c.file.path } else { c.table.filelist[pos.file_idx] }
+	kpos := '${file_path}:${pos.line_nr}:${message}'
 	if kpos !in c.notice_lines {
 		c.notice_lines[kpos] = true
+		c.nr_notices++
+		if c.pref.message_limit >= 0 && c.notices.len >= c.pref.message_limit {
+			return
+		}
 		note := errors.Notice{
 			reporter:  errors.Reporter.checker
 			pos:       pos
-			file_path: c.file.path
+			file_path: file_path
 			message:   message
 			details:   details
 		}
 		c.file.notices << note
 		c.notices << note
-		c.nr_notices++
 	}
 }
 
-fn (mut c Checker) warn_or_error(message string, pos token.Pos, warn bool) {
+fn (mut c Checker) warn_or_error(message string, pos token.Pos, warn bool, options MessageOptions) {
 	if !warn {
 		$if checker_exit_on_first_error ? {
 			eprintln('\n\n>> checker error: ${message}, pos: ${pos}')
@@ -122,20 +130,20 @@ fn (mut c Checker) warn_or_error(message string, pos token.Pos, warn bool) {
 		details = c.error_details.join('\n')
 		c.error_details = []
 	}
+	file_path := if pos.file_idx < 0 { c.file.path } else { c.table.filelist[pos.file_idx] }
 	if warn && !c.pref.skip_warnings {
 		c.nr_warnings++
-		if c.pref.message_limit >= 0 && c.nr_warnings >= c.pref.message_limit {
-			c.should_abort = true
+		if c.pref.message_limit >= 0 && c.warnings.len >= c.pref.message_limit {
 			return
 		}
 		// deduplicate warnings for the same line
-		kpos := '${c.file.path}:${pos.line_nr}:${message}'
+		kpos := '${file_path}:${pos.line_nr}:${message}'
 		if kpos !in c.warning_lines {
 			c.warning_lines[kpos] = true
 			wrn := errors.Warning{
 				reporter:  errors.Reporter.checker
 				pos:       pos
-				file_path: c.file.path
+				file_path: file_path
 				message:   message
 				details:   details
 			}
@@ -145,12 +153,19 @@ fn (mut c Checker) warn_or_error(message string, pos token.Pos, warn bool) {
 		return
 	}
 	if !warn {
+		// Use provided call_stack or fall back to file.call_stack
+		actual_call_stack := if options.call_stack.len > 0 {
+			options.call_stack
+		} else {
+			c.file.call_stack
+		}
 		if c.pref.fatal_errors {
 			util.show_compiler_message('error:', errors.CompilerMessage{
-				pos:       pos
-				file_path: c.file.path
-				message:   message
-				details:   details
+				pos:        pos
+				file_path:  file_path
+				message:    message
+				details:    details
+				call_stack: actual_call_stack
 			})
 			exit(1)
 		}
@@ -160,15 +175,16 @@ fn (mut c Checker) warn_or_error(message string, pos token.Pos, warn bool) {
 			return
 		}
 		// deduplicate errors for the same line
-		kpos := '${c.file.path}:${pos.line_nr}:${message}'
+		kpos := '${file_path}:${pos.line_nr}:${message}'
 		if kpos !in c.error_lines {
 			c.error_lines[kpos] = true
 			err := errors.Error{
-				reporter:  errors.Reporter.checker
-				pos:       pos
-				file_path: c.file.path
-				message:   message
-				details:   details
+				reporter:   errors.Reporter.checker
+				pos:        pos
+				file_path:  file_path
+				message:    message
+				details:    details
+				call_stack: actual_call_stack
 			}
 			c.file.errors << err
 			c.errors << err
@@ -188,7 +204,7 @@ fn (mut c Checker) trace[T](fbase string, x &T) {
 }
 
 fn (mut c Checker) deprecate(kind string, name string, attrs []ast.Attr, pos token.Pos) {
-	// println('deprecate kind=${kind} name=${name} attrs=$attrs')
+	// println('deprecate kind=${kind} name=${name} attrs=${attrs}')
 	// print_backtrace()
 	mut deprecation_message := ''
 	now := time.now()
@@ -216,8 +232,7 @@ fn (mut c Checker) deprecate(kind string, name string, attrs []ast.Attr, pos tok
 			deprecation_message), pos)
 	} else if after_time == now {
 		// print_backtrace()
-		c.warn(semicolonize('${start_message} has been deprecated', deprecation_message),
-			pos)
+		c.warn(semicolonize('${start_message} has been deprecated', deprecation_message), pos)
 		// c.warn(semicolonize('${start_message} has been deprecated!11 m=${deprecation_message}',
 		// deprecation_message), pos)
 	} else {
